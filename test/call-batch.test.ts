@@ -37,6 +37,7 @@ describe("three-call batches", () => {
     expect(result.calls.filter((call) => call.status === "INITIATED")).toHaveLength(2);
     expect(result.calls.filter((call) => call.status === "FAILED")).toHaveLength(1);
     expect(result.calls.find((call) => call.status === "FAILED")?.errorCode).toBe("21608");
+    expect(result.calls.map((call) => call.contactLabel)).toEqual(["A", "B", "C"]);
   });
 
   it("associates market calls with their order, market, and carrier", async () => {

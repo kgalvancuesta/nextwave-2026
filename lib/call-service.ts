@@ -1,4 +1,5 @@
 import { mapTwilioCallStatus } from "./call-status";
+import { normalizePhoneNumber, PhoneNumberError } from "./phone";
 import type { MarketlineRepository } from "./repository";
 import { describeTwilioError, type TelephonyProvider } from "./telephony";
 import type { CallRecord, VoiceResponse } from "./types";
@@ -40,10 +41,12 @@ export async function handleInboundCall(input: {
   const callSid = required(input.params, "CallSid");
   const fromNumber = required(input.params, "From");
   const toNumber = required(input.params, "To");
+  const contact = resolveContactByPhoneNumber(input.repository, fromNumber);
   const call = input.repository.upsertInboundCall({
     twilioCallSid: callSid,
     fromNumber,
     toNumber,
+    contactId: contact?.id ?? null,
     status: mapTwilioCallStatus(input.params.CallStatus || "in-progress"),
     rawPayload: input.params,
   });
@@ -52,6 +55,8 @@ export async function handleInboundCall(input: {
     direction: "INBOUND",
     fromNumber,
     toNumber,
+    contactId: call.contactId,
+    contactLabel: call.contactLabel,
     recordingEnabled: input.recordingEnabled,
   });
   return { call, response };
@@ -67,12 +72,14 @@ export async function handleOutboundAnswer(input: {
   const fromNumber = required(input.params, "From");
   const toNumber = required(input.params, "To");
   const existing = input.repository.getCallByTwilioSid(callSid);
-  if (existing) input.repository.updateCallStatus(callSid, "IN_PROGRESS", input.params);
+  const call = existing ? input.repository.updateCallStatus(callSid, "IN_PROGRESS", input.params) : null;
   return input.voiceSession.handleOutboundCall({
     callSid,
     direction: "OUTBOUND",
     fromNumber,
     toNumber,
+    contactId: call?.contactId ?? null,
+    contactLabel: call?.contactLabel ?? null,
     recordingEnabled: input.recordingEnabled,
   });
 }
@@ -118,4 +125,13 @@ function integerOrNull(value: string | undefined): number | null {
   if (!value) return null;
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function resolveContactByPhoneNumber(repository: MarketlineRepository, phoneNumber: string) {
+  try {
+    return repository.getContactByE164PhoneNumber(normalizePhoneNumber(phoneNumber));
+  } catch (error) {
+    if (error instanceof PhoneNumberError) return null;
+    throw error;
+  }
 }

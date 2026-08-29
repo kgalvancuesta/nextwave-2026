@@ -68,6 +68,8 @@ export interface CallContext {
   direction: CallDirection;
   fromNumber: string;
   toNumber: string;
+  contactId: string | null;
+  contactLabel: string | null;
   recordingEnabled: boolean;
 }
 

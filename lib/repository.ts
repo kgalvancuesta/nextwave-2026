@@ -18,6 +18,12 @@ export class MarketlineRepository {
     return row ? toContact(row) : null;
   }
 
+  getContactByE164PhoneNumber(e164PhoneNumber: string): Contact | null {
+    const row = this.db.prepare("SELECT * FROM contacts WHERE e164_phone_number = ?")
+      .get(e164PhoneNumber) as Row | undefined;
+    return row ? toContact(row) : null;
+  }
+
   getContacts(ids: string[]): Contact[] {
     if (ids.length === 0) return [];
     const placeholders = ids.map(() => "?").join(",");
@@ -139,27 +145,35 @@ export class MarketlineRepository {
   }
 
   getCall(id: string): CallRecord | null {
-    const row = this.db.prepare(`SELECT calls.*, contacts.label AS contact_label
-      FROM calls LEFT JOIN contacts ON contacts.id = calls.contact_id WHERE calls.id = ?`).get(id) as Row | undefined;
+    const row = this.db.prepare(`SELECT calls.*, contacts.id AS resolved_contact_id, contacts.label AS contact_label
+      FROM calls LEFT JOIN contacts ON contacts.id = calls.contact_id OR (
+        calls.contact_id IS NULL AND calls.direction = 'INBOUND' AND contacts.e164_phone_number = calls.from_number
+      ) WHERE calls.id = ?`).get(id) as Row | undefined;
     return row ? toCall(row) : null;
   }
 
   getCallByTwilioSid(twilioCallSid: string): CallRecord | null {
-    const row = this.db.prepare(`SELECT calls.*, contacts.label AS contact_label
-      FROM calls LEFT JOIN contacts ON contacts.id = calls.contact_id WHERE calls.twilio_call_sid = ?`)
+    const row = this.db.prepare(`SELECT calls.*, contacts.id AS resolved_contact_id, contacts.label AS contact_label
+      FROM calls LEFT JOIN contacts ON contacts.id = calls.contact_id OR (
+        calls.contact_id IS NULL AND calls.direction = 'INBOUND' AND contacts.e164_phone_number = calls.from_number
+      ) WHERE calls.twilio_call_sid = ?`)
       .get(twilioCallSid) as Row | undefined;
     return row ? toCall(row) : null;
   }
 
   listCalls(limit = 100): CallRecord[] {
-    return (this.db.prepare(`SELECT calls.*, contacts.label AS contact_label
-      FROM calls LEFT JOIN contacts ON contacts.id = calls.contact_id
+    return (this.db.prepare(`SELECT calls.*, contacts.id AS resolved_contact_id, contacts.label AS contact_label
+      FROM calls LEFT JOIN contacts ON contacts.id = calls.contact_id OR (
+        calls.contact_id IS NULL AND calls.direction = 'INBOUND' AND contacts.e164_phone_number = calls.from_number
+      )
       ORDER BY calls.created_at DESC LIMIT ?`).all(limit) as Row[]).map(toCall);
   }
 
   listCallsForMarket(marketId: string): CallRecord[] {
-    return (this.db.prepare(`SELECT calls.*, contacts.label AS contact_label
-      FROM calls LEFT JOIN contacts ON contacts.id = calls.contact_id
+    return (this.db.prepare(`SELECT calls.*, contacts.id AS resolved_contact_id, contacts.label AS contact_label
+      FROM calls LEFT JOIN contacts ON contacts.id = calls.contact_id OR (
+        calls.contact_id IS NULL AND calls.direction = 'INBOUND' AND contacts.e164_phone_number = calls.from_number
+      )
       WHERE calls.market_id = ? ORDER BY calls.created_at DESC`).all(marketId) as Row[]).map(toCall);
   }
 
@@ -167,20 +181,26 @@ export class MarketlineRepository {
     twilioCallSid: string;
     fromNumber: string;
     toNumber: string;
+    contactId: string | null;
     status: CallStatus;
     rawPayload: Record<string, string>;
   }): CallRecord {
     const existing = this.getCallByTwilioSid(input.twilioCallSid);
-    if (existing) return this.updateCallStatus(input.twilioCallSid, input.status, input.rawPayload);
+    if (existing) {
+      if (!existing.contactId && input.contactId) {
+        this.db.prepare("UPDATE calls SET contact_id = ? WHERE id = ?").run(input.contactId, existing.id);
+      }
+      return this.updateCallStatus(input.twilioCallSid, input.status, input.rawPayload);
+    }
     const now = new Date().toISOString();
     const terminal = isTerminalCallStatus(input.status);
     this.db.prepare(`INSERT INTO calls (
       id, twilio_call_sid, batch_id, contact_id, direction, from_number, to_number,
       status, status_rank, started_at, answered_at, completed_at, duration_seconds,
       error_code, error_message, raw_status_payload, created_at, updated_at
-    ) VALUES (?, ?, NULL, NULL, 'INBOUND', ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?)`)
+    ) VALUES (?, ?, NULL, ?, 'INBOUND', ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?)`)
       .run(
-        randomUUID(), input.twilioCallSid, input.fromNumber, input.toNumber, input.status,
+        randomUUID(), input.twilioCallSid, input.contactId, input.fromNumber, input.toNumber, input.status,
         callStatusRank(input.status), now, input.status === "IN_PROGRESS" ? now : null,
         terminal ? now : null, JSON.stringify(input.rawPayload), now, now,
       );
@@ -290,7 +310,7 @@ function toContact(row: Row): Contact {
 function toCall(row: Row): CallRecord {
   return {
     id: String(row.id), twilioCallSid: nullableString(row.twilio_call_sid), batchId: nullableString(row.batch_id),
-    contactId: nullableString(row.contact_id), contactLabel: nullableString(row.contact_label),
+    contactId: nullableString(row.resolved_contact_id ?? row.contact_id), contactLabel: nullableString(row.contact_label),
     orderId: nullableString(row.order_id), marketId: nullableString(row.market_id), carrierId: nullableString(row.carrier_id),
     direction: row.direction as CallRecord["direction"], fromNumber: String(row.from_number),
     toNumber: String(row.to_number), status: row.status as CallStatus, startedAt: String(row.started_at),

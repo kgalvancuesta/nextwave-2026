@@ -143,6 +143,7 @@ describe("inbound call state — integration path through repository", () => {
         twilioCallSid: sid,
         fromNumber: "+12025550124",
         toNumber: "+12025550137",
+        contactId: null,
         status: "IN_PROGRESS",
         rawPayload: {},
       });
@@ -158,6 +159,7 @@ describe("inbound call state — integration path through repository", () => {
       twilioCallSid: "CA_dup",
       fromNumber: "+12025550125",
       toNumber: "+12025550137",
+      contactId: null,
       status: "RINGING",
       rawPayload: {},
     });
