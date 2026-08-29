@@ -28,6 +28,7 @@ import type {
   OrderWorkspace,
 } from "./market-types";
 import { generatedOrderReference, normalizeOrderReference } from "./market-types";
+import { buildAwardRecapBody, RECAP_MAX_LENGTH } from "./recap";
 import { MarketlineRepository } from "./repository";
 import type { Contact } from "./types";
 
@@ -88,6 +89,8 @@ export interface ProgressiveOfferUpdateInput {
   confidence?: number | null;
   humanRequired?: boolean;
   humanReason?: string | null;
+  /** The Realtime conversation item the fact came from. Never invented by the server. */
+  conversationItemId?: string | null;
 }
 
 export interface InboundMarketAttachment {
@@ -104,6 +107,12 @@ export interface ProcurementCallContext {
   latestOffer: OfferRecord | null;
   instruction: MarketInstruction;
   marketClosed: boolean;
+  /**
+   * Set only when this carrier is the one that won. A closed market is not the
+   * same situation for the winner as for everyone else, and the winner is owed
+   * a spoken read-back of the exact committed terms before the call ends.
+   */
+  award: { commitmentId: string; offer: OfferRecord; recapAddress: string | null } | null;
 }
 
 export class OrderMarketService {
@@ -245,7 +254,9 @@ export class OrderMarketService {
     const evaluation = this.evaluateSnapshot(market, carrierRows, calls, latestByCarrier);
     const evaluatedLatest = new Map(evaluation.offers.map((offer) => [offer.id, offer]));
     const historicalEvaluation = new Map(evaluateOffers(market.mandate, rawOffers.map(toOfferFacts)).map((offer) => [offer.id, offer]));
-    const offers = rawOffers.map((offer) => decorateOffer(offer, evaluatedLatest.get(offer.id) ?? historicalEvaluation.get(offer.id)!));
+    const offers = this.attachEvidence(
+      rawOffers.map((offer) => decorateOffer(offer, evaluatedLatest.get(offer.id) ?? historicalEvaluation.get(offer.id)!)),
+    );
     for (const [carrierId, offer] of latestByCarrier) {
       const decorated = offers.find((candidate) => candidate.id === offer.id);
       if (decorated) latestByCarrier.set(carrierId, decorated);
@@ -354,19 +365,23 @@ export class OrderMarketService {
     const offerId = randomUUID();
     const version = Number(previous?.version || 0) + 1;
     const late = ["COMMITTED", "CLOSED"].includes(market.status);
+    // The server times the evidence from the call clock. A model cannot move
+    // a fact to a different moment of the recording by mis-stating an offset.
+    const evidenceOffsetMs = this.evidenceOffset(callId || prior?.callId || null, now);
     this.db.transaction(() => {
       this.db.prepare(`INSERT INTO procurement_offer_versions (
         id, market_id, carrier_id, call_id, version, availability, price, currency, rate_all_in,
         pickup_time, expected_arrival, firm, expires_at, accessorials, carrier_conditions,
         confirmed_requirements, rejected_requirements, raw_statement, confidence, human_required, human_reason,
-        supersedes_version_id, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        supersedes_version_id, created_at, conversation_item_id, evidence_offset_ms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         offerId, marketId, carrierId, callId || prior?.callId || null, version, merged.availability,
         merged.price, merged.currency, nullableBoolean(merged.rateAllIn), merged.pickupTime,
         merged.expectedArrival, nullableBoolean(merged.firm), merged.expiresAt,
         JSON.stringify(merged.accessorials), JSON.stringify(merged.carrierConditions),
         JSON.stringify(merged.confirmedRequirements), JSON.stringify(merged.rejectedRequirements), merged.rawStatement, merged.confidence,
         merged.humanRequired ? 1 : 0, merged.humanReason, prior?.id || null, now,
+        merged.conversationItemId, evidenceOffsetMs,
       );
 
       const evaluated = evaluateOffers(market.mandate, [{ ...toOfferFacts(merged), id: offerId, carrierId }])[0]!;
@@ -465,8 +480,15 @@ export class OrderMarketService {
     const state = workspace?.markets.find((candidate) => candidate.market.id === call.marketId);
     const carrierState = state?.carriers.find((candidate) => candidate.carrier.id === (call.carrierId || call.contactId));
     if (!workspace || !state || !carrierState) return null;
+    const commitment = state.activeCommitment;
+    const awardedOffer = commitment?.carrierId === carrierState.carrier.id
+      ? state.offers.find((offer) => offer.id === commitment.offerId) ?? null
+      : null;
     return {
       callId,
+      award: commitment && awardedOffer
+        ? { commitmentId: commitment.id, offer: awardedOffer, recapAddress: commitment.recapAddress }
+        : null,
       order: workspace.order,
       market: state.market,
       carrier: carrierState.carrier,
@@ -580,6 +602,9 @@ export class OrderMarketService {
       this.db.prepare("UPDATE market_carriers SET status = CASE WHEN carrier_id = ? THEN 'FINAL' ELSE status END, updated_at = ? WHERE market_id = ?")
         .run(offer.carrierId, now, market.id);
       this.insertEvent(market.orderId, market.id, offer.callId, "OFFER_COMMITTED", `Committed offer in ${offer.currency}`, now);
+      const order = this.getOrderRecord(market.orderId);
+      const carrier = state.carriers.find((candidate) => candidate.carrier.id === offer.carrierId)?.carrier;
+      if (order && carrier) this.queueRecap(commitmentId, order, carrier, offer, now);
     })();
     return this.getOrder(market.orderId)!;
   }
@@ -726,6 +751,7 @@ export class OrderMarketService {
     const persistedComparable = this.db.prepare("SELECT 1 FROM offers WHERE id = ?").get(expectedOfferId);
     if (!persistedComparable) return;
     const now = new Date().toISOString();
+    const commitmentId = randomUUID();
     this.db.transaction(() => {
       const current = this.db.prepare("SELECT revision, status, automatic_award FROM markets WHERE id = ?").get(marketId) as Row | undefined;
       if (!current || Number(current.revision) !== expectedRevision || !Boolean(current.automatic_award)
@@ -737,7 +763,7 @@ export class OrderMarketService {
       if (active) return;
       this.db.prepare(`INSERT INTO commitments
         (id, order_id, market_id, offer_id, carrier_id, status, created_at)
-        VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?)`).run(randomUUID(), market.orderId, marketId, offer.id, offer.carrierId, now);
+        VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?)`).run(commitmentId, market.orderId, marketId, offer.id, offer.carrierId, now);
       this.db.prepare("UPDATE markets SET status = 'COMMITTED', closed_at = ?, review_reason = NULL, updated_at = ? WHERE id = ?")
         .run(now, now, marketId);
       this.db.prepare("UPDATE orders SET lifecycle_status = 'COMMITTED', exception_reason = NULL, updated_at = ? WHERE id = ?")
@@ -749,7 +775,15 @@ export class OrderMarketService {
         .run(offer.carrierId, offer.carrierId, offer.carrierId, expectedRevision, now, marketId);
       this.insertEvent(market.orderId, marketId, offer.callId, "OFFER_AUTO_AWARDED",
         JSON.stringify({ offerId: offer.id, carrierId: offer.carrierId, marketRevision: expectedRevision }), now);
+      const order = this.getOrderRecord(market.orderId);
+      const carrier = state.carriers.find((candidate) => candidate.carrier.id === offer.carrierId)?.carrier;
+      if (order && carrier) this.queueRecap(commitmentId, order, carrier, offer, now);
     })();
+  }
+
+  private getOrderRecord(orderId: string): OrderRecord | null {
+    const row = this.db.prepare("SELECT * FROM orders WHERE id = ?").get(orderId) as Row | undefined;
+    return row ? this.toOrder(row) : null;
   }
 
   private toOrder(row: Row): OrderRecord {
@@ -787,6 +821,155 @@ export class OrderMarketService {
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
     };
+  }
+
+  /**
+   * Milliseconds from the start of the audio to the moment the fact was
+   * recorded. Measured against the answered leg when Twilio has reported it,
+   * because recording begins when the carrier picks up, not when we dial.
+   */
+  private evidenceOffset(callId: string | null, capturedAt: string): number | null {
+    if (!callId) return null;
+    const call = this.calls.getCall(callId);
+    const anchor = call?.answeredAt || call?.startedAt;
+    if (!anchor) return null;
+    const offset = Date.parse(capturedAt) - Date.parse(anchor);
+    return Number.isFinite(offset) && offset >= 0 ? offset : null;
+  }
+
+  /**
+   * Resolves each recorded fact to a playable position in the call audio. The
+   * recording's own start time wins when Twilio has reported it, since the
+   * media begins there rather than at the answered event.
+   */
+  private attachEvidence(offers: OfferRecord[]): OfferRecord[] {
+    const cache = new Map<string, { audioUrl: string | null; recordingStartTime: string | null }>();
+    const lookup = (callId: string) => {
+      const cached = cache.get(callId);
+      if (cached) return cached;
+      const row = this.db.prepare(`SELECT recordings.recording_url, recordings.recording_start_time
+        FROM calls LEFT JOIN recordings ON recordings.twilio_call_sid = calls.twilio_call_sid
+        WHERE calls.id = ? ORDER BY recordings.created_at DESC LIMIT 1`).get(callId) as Row | undefined;
+      const resolved = {
+        audioUrl: nullableString(row?.recording_url) ? `/api/offers/AUDIO_ID/audio` : null,
+        recordingStartTime: nullableString(row?.recording_start_time),
+      };
+      cache.set(callId, resolved);
+      return resolved;
+    };
+
+    return offers.map((offer) => {
+      if (!offer.callId) return offer;
+      const { audioUrl, recordingStartTime } = lookup(offer.callId);
+      const fromRecording = recordingStartTime
+        ? Date.parse(offer.createdAt) - Date.parse(recordingStartTime)
+        : Number.NaN;
+      const offsetMs = Number.isFinite(fromRecording) && fromRecording >= 0 ? fromRecording : offer.evidenceOffsetMs;
+      return {
+        ...offer,
+        evidence: {
+          callId: offer.callId,
+          audioUrl: audioUrl ? audioUrl.replace("AUDIO_ID", offer.id) : null,
+          offsetMs,
+          conversationItemId: offer.conversationItemId,
+          rawStatement: offer.rawStatement,
+          capturedAt: offer.createdAt,
+        },
+      };
+    });
+  }
+
+  /**
+   * The award is only half of a commitment; the carrier must hold the same
+   * terms in writing. The body is frozen here, inside the award transaction,
+   * and delivery is a separate retryable step so a Twilio outage can never
+   * roll back a booking the carrier already accepted verbally.
+   */
+  private queueRecap(commitmentId: string, order: OrderRecord, carrier: Contact, offer: OfferRecord, now: string): void {
+    const body = buildAwardRecapBody({
+      commitmentId,
+      order,
+      carrierLabel: carrier.label,
+      offer,
+    });
+    const deliverable = body.length <= RECAP_MAX_LENGTH && Boolean(carrier.e164PhoneNumber);
+    this.db.prepare(`UPDATE commitments SET recap_status = ?, recap_channel = ?, recap_address = ?, recap_body = ?,
+      recap_error = ? WHERE id = ?`).run(
+      deliverable ? "PENDING" : "FAILED",
+      "sms",
+      carrier.e164PhoneNumber || null,
+      body,
+      deliverable ? null : "Recap could not be queued: the carrier has no phone number or the body exceeds the SMS limit.",
+      commitmentId,
+    );
+    this.insertEvent(order.id, offer.marketId, offer.callId, deliverable ? "RECAP_QUEUED" : "RECAP_FAILED",
+      deliverable ? `Written recap queued for ${carrier.e164PhoneNumber}` : "Recap could not be queued", now);
+  }
+
+  /**
+   * The Twilio media behind one recorded fact, with the position in the audio
+   * where it was said. The raw provider URL never leaves the server; callers
+   * stream it through this app so recordings stay behind the dashboard's auth.
+   */
+  getOfferRecording(offerId: string): { recordingUrl: string; offsetMs: number | null } | null {
+    const row = this.db.prepare(`SELECT procurement_offer_versions.created_at, procurement_offer_versions.evidence_offset_ms,
+      recordings.recording_url, recordings.recording_start_time
+      FROM procurement_offer_versions
+      JOIN calls ON calls.id = procurement_offer_versions.call_id
+      JOIN recordings ON recordings.twilio_call_sid = calls.twilio_call_sid
+      WHERE procurement_offer_versions.id = ? AND recordings.recording_url IS NOT NULL
+      ORDER BY recordings.created_at DESC LIMIT 1`).get(offerId) as Row | undefined;
+    if (!row) return null;
+    const start = nullableString(row.recording_start_time);
+    const fromRecording = start ? Date.parse(String(row.created_at)) - Date.parse(start) : Number.NaN;
+    return {
+      recordingUrl: String(row.recording_url),
+      offsetMs: Number.isFinite(fromRecording) && fromRecording >= 0 ? fromRecording : nullableNumber(row.evidence_offset_ms),
+    };
+  }
+
+  /** Commitments whose written recap still owes the carrier a delivery attempt. */
+  listPendingRecaps(): Array<{ commitmentId: string; orderId: string; marketId: string; address: string; body: string; attempts: number }> {
+    return (this.db.prepare(`SELECT id, order_id, market_id, recap_address, recap_body, recap_attempts
+      FROM commitments WHERE recap_status = 'PENDING' AND recap_address IS NOT NULL AND recap_body IS NOT NULL
+      ORDER BY created_at`).all() as Row[]).map((row) => ({
+        commitmentId: String(row.id),
+        orderId: String(row.order_id),
+        marketId: String(row.market_id),
+        address: String(row.recap_address),
+        body: String(row.recap_body),
+        attempts: Number(row.recap_attempts || 0),
+      }));
+  }
+
+  markRecapSent(commitmentId: string, deliveryId: string): void {
+    const now = new Date().toISOString();
+    const row = this.db.prepare("SELECT order_id, market_id, recap_address FROM commitments WHERE id = ?")
+      .get(commitmentId) as Row | undefined;
+    if (!row) return;
+    this.db.transaction(() => {
+      this.db.prepare(`UPDATE commitments SET recap_status = 'SENT', recap_delivery_id = ?, recap_sent_at = ?,
+        recap_error = NULL, recap_attempts = recap_attempts + 1 WHERE id = ?`).run(deliveryId, now, commitmentId);
+      this.insertEvent(String(row.order_id), String(row.market_id), null, "RECAP_SENT",
+        `Written recap delivered to ${row.recap_address} (${deliveryId})`, now);
+    })();
+  }
+
+  markRecapFailed(commitmentId: string, error: string): void {
+    const now = new Date().toISOString();
+    const row = this.db.prepare("SELECT order_id, market_id, recap_attempts FROM commitments WHERE id = ?")
+      .get(commitmentId) as Row | undefined;
+    if (!row) return;
+    // A recap that cannot be delivered is an operational exception, not a
+    // silent failure: after three attempts it stops retrying and says so.
+    const attempts = Number(row.recap_attempts || 0) + 1;
+    const exhausted = attempts >= 3;
+    this.db.transaction(() => {
+      this.db.prepare(`UPDATE commitments SET recap_status = ?, recap_error = ?, recap_attempts = ? WHERE id = ?`)
+        .run(exhausted ? "FAILED" : "PENDING", error, attempts, commitmentId);
+      this.insertEvent(String(row.order_id), String(row.market_id), null, "RECAP_FAILED",
+        `${error} (attempt ${attempts}${exhausted ? ", giving up" : ""})`, now);
+    })();
   }
 
   private getActiveCommitment(marketId: string): CommitmentRecord | null {
@@ -880,6 +1063,8 @@ function toOffer(row: Row): OfferRecord {
     confirmedRequirements: jsonStringArray(row.confirmed_requirements), rawStatement: nullableString(row.raw_statement),
     rejectedRequirements: jsonStringArray(row.rejected_requirements),
     confidence: nullableNumber(row.confidence), humanRequired: Boolean(row.human_required), humanReason: nullableString(row.human_reason),
+    conversationItemId: nullableString(row.conversation_item_id), evidenceOffsetMs: nullableNumber(row.evidence_offset_ms),
+    evidence: null,
     waitingTimeIncluded: null, extraFees: null, conditions: null, isFinalOffer: Boolean(row.firm),
     requiresImmediateDecision: false, callbackAllowed: true,
     supersedesOfferId: nullableString(row.supersedes_version_id), createdAt: String(row.created_at),
@@ -928,7 +1113,7 @@ function mergeOfferUpdate(prior: OfferRecord | null, update: ProgressiveOfferUpd
       availability: "UNKNOWN" as const, price: null, currency: defaultCurrency, rateAllIn: null,
       pickupTime: null, expectedArrival: null, firm: null, expiresAt: null, accessorials: [], carrierConditions: [],
       confirmedRequirements: [], rawStatement: null, confidence: null, humanRequired: false, humanReason: null,
-      rejectedRequirements: [],
+      rejectedRequirements: [], conversationItemId: null, evidenceOffsetMs: null, evidence: null,
       waitingTimeIncluded: null, extraFees: null, conditions: null, isFinalOffer: false,
       requiresImmediateDecision: false, callbackAllowed: true, supersedesOfferId: null, createdAt: "",
       isComparable: false, isValid: true, invalidReasons: [], feasibilityViolations: [], missingFields: ["availability" as const],
@@ -950,6 +1135,9 @@ function mergeOfferUpdate(prior: OfferRecord | null, update: ProgressiveOfferUpd
     confidence: update.confidence !== undefined ? update.confidence : prior?.confidence ?? null,
     humanRequired: update.humanRequired ?? prior?.humanRequired ?? false,
     humanReason: update.humanReason !== undefined ? update.humanReason?.trim() || null : prior?.humanReason ?? null,
+    // Evidence belongs to the version that captured it, so it is never
+    // inherited from the previous version the way commercial facts are.
+    conversationItemId: update.conversationItemId?.trim() || null,
   };
 }
 
@@ -1008,6 +1196,11 @@ function toCommitment(row: Row): CommitmentRecord {
     id: String(row.id), orderId: String(row.order_id), marketId: String(row.market_id), offerId: String(row.offer_id),
     carrierId: String(row.carrier_id), carrierLabel: String(row.carrier_label), status: String(row.status) as CommitmentRecord["status"],
     createdAt: String(row.created_at), invalidatedAt: nullableString(row.invalidated_at), invalidationReason: nullableString(row.invalidation_reason),
+    recapStatus: String(row.recap_status || "NOT_REQUIRED") as CommitmentRecord["recapStatus"],
+    recapChannel: nullableString(row.recap_channel) as CommitmentRecord["recapChannel"],
+    recapAddress: nullableString(row.recap_address), recapBody: nullableString(row.recap_body),
+    recapDeliveryId: nullableString(row.recap_delivery_id), recapError: nullableString(row.recap_error),
+    recapSentAt: nullableString(row.recap_sent_at), recapAttempts: Number(row.recap_attempts || 0),
   };
 }
 

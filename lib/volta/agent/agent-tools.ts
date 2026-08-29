@@ -76,6 +76,8 @@ const procurementUpdateArgs = z.object({
   confidence: z.number().min(0).max(1).nullable(),
   humanRequired: z.boolean(),
   humanReason: z.string().nullable(),
+  conversationItemId: z.string().nullable()
+    .describe("The id of the conversation item where the carrier said this. Never invent it; pass null if unknown."),
 });
 
 const procurementInstructionArgs = z.object({});

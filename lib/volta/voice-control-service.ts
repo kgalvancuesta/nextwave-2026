@@ -381,6 +381,9 @@ export class VoiceControlService {
       if (!this.procurement) throw new Error("Procurement workflow is not configured");
       const outcome = this.procurement.recordUpdate(call.id, args);
       this.propagateProcurementUpdates(outcome.controlUpdates);
+      // Recording a fact can be the update that closes the market. Deliver the
+      // written recap now, while the winning carrier is still on the line.
+      await this.procurement.flushRecaps();
       return outcome.result;
     }
 

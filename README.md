@@ -82,6 +82,34 @@ Order-launched procurement calls use a narrower tool surface: they cannot call
 `propose_commitment`; they write progressive facts into `OrderMarketService`,
 and only its transactional award gate can create the dashboard commitment.
 
+## What makes an award auditable
+
+An award is a claim about what a carrier agreed to. Two mechanisms make that
+claim checkable rather than trusted.
+
+**The written recap.** The award transaction freezes an SMS body next to the
+commitment, built only from persisted server state — never from model output —
+so the message the carrier receives is exactly the commitment the dashboard
+holds. Delivery is a separate retryable step (`flushAwardRecaps`), which means a
+Twilio outage delays the written record without ever rolling back a booking the
+carrier already accepted verbally. A recap that fails three times is marked
+`FAILED` and surfaces in the commitment panel instead of disappearing. The
+winning carrier also hears the same terms read back before the call ends: the
+award payload travels in the tool result that closed the market, and the agent
+must confirm the terms and name the booking ID rather than re-negotiate.
+
+**The audio evidence.** Every progressive offer version stores the carrier's
+verbatim statement, the Realtime conversation item it came from, and the offset
+into the call recording where it was said. The offset is measured by the server
+from the call clock — the recording's own start time once Twilio reports it,
+the answered leg before that — so a model cannot move a fact to a different
+moment of the audio. The dashboard plays that moment through
+`/api/offers/:id/audio`, which streams Twilio media using the account
+credentials; the raw provider URL never reaches the browser, and the route sits
+behind the same basic-auth proxy as the rest of the dashboard. Set
+`RECORD_CALLS=true` before the call to capture the audio; without it the
+statement and offset are still recorded, but there is nothing to play.
+
 ## 1. Install and initialize
 
 Requirements: Node.js 22 or newer, npm, a Twilio account, a voice-capable Twilio phone number, and ngrok or another HTTPS tunnel.
@@ -167,6 +195,7 @@ Twilio signatures are validated against `PUBLIC_BASE_URL` by default. A rejected
 4. Answer the carrier legs. Give one complete feasible quote, one partial quote, and one infeasible quote. Verify partial facts appear progressively and the strong carrier is held while unresolved lanes continue.
 5. Complete the partial quote. Verify the evaluator requests missing fields, negotiates only eligible frontier offers, releases dominated or infeasible carriers, and awards only after the market-close policy is satisfied.
 6. Confirm the winning commitment appears once and the order turns green. A late inbound better quote may be recorded, but must not revoke the closed award.
+6b. Confirm the winning carrier hears the exact terms read back with the booking ID, and that the commitment panel shows the written recap as sent, with the body it sent. With `RECORD_CALLS=true`, open **Evidence** under any offer and confirm the audio starts at the moment the carrier stated that number.
 7. For a recovery test, mark the committed carrier failed, create a recovery market, and repeat. The failed market and commitment remain visible.
 8. Mark the transport completed. Confirm the order becomes gray and remains available under the Past filter.
 

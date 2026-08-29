@@ -17,6 +17,7 @@ export type EvaluatorAction =
   | "ASK_MISSING_FIELD" | "CONTINUE_DISCOVERY" | "HOLD" | "NEGOTIATE"
   | "CONFIRM" | "RELEASE" | "HUMAN_REQUIRED" | "REQUEST_HUMAN_REVIEW" | "AWARD";
 export type CommitmentStatus = "ACTIVE" | "INVALIDATED" | "FULFILLED";
+export type RecapStatus = "NOT_REQUIRED" | "PENDING" | "SENT" | "FAILED";
 export type DemurrageRiskStatus = "MONITORED" | "AT_RISK" | "IN_PROGRESS" | "RESOLVED";
 
 export interface FeasibilityViolation {
@@ -109,6 +110,9 @@ export interface OfferRecord {
   confidence: number | null;
   humanRequired: boolean;
   humanReason: string | null;
+  conversationItemId: string | null;
+  evidenceOffsetMs: number | null;
+  evidence: OfferEvidence | null;
   waitingTimeIncluded: string | null;
   extraFees: string | null;
   conditions: string | null;
@@ -139,6 +143,28 @@ export interface CommitmentRecord {
   createdAt: string;
   invalidatedAt: string | null;
   invalidationReason: string | null;
+  /** The written record of the agreed terms, frozen when the award committed. */
+  recapStatus: RecapStatus;
+  recapChannel: "sms" | null;
+  recapAddress: string | null;
+  recapBody: string | null;
+  recapDeliveryId: string | null;
+  recapError: string | null;
+  recapSentAt: string | null;
+  recapAttempts: number;
+}
+
+/**
+ * Where in the call a recorded fact was actually said. `audioUrl` points at
+ * this app's authenticated proxy, never at the raw Twilio media URL.
+ */
+export interface OfferEvidence {
+  callId: string;
+  audioUrl: string | null;
+  offsetMs: number | null;
+  conversationItemId: string | null;
+  rawStatement: string | null;
+  capturedAt: string;
 }
 
 export interface OrderEventRecord {

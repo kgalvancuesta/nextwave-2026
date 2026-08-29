@@ -1,9 +1,9 @@
 "use client";
 
-import { AlertTriangle, ArrowRight, Check, ChevronDown, ChevronUp, PhoneCall, Plus, RotateCcw, Trophy, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, ChevronDown, ChevronUp, FileText, PhoneCall, Plus, RotateCcw, Trophy, Volume2, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { errorMessage, requestJson } from "@/lib/client-http";
-import { publicOrderReference, type MarketCarrierState, type MarketState, type OfferRecord, type OrderWorkspace } from "@/lib/market-types";
+import { publicOrderReference, type CommitmentRecord, type MarketCarrierState, type MarketState, type OfferRecord, type OrderWorkspace } from "@/lib/market-types";
 
 interface Props {
   workspace: OrderWorkspace;
@@ -60,7 +60,7 @@ export function OrderWorkspaceCard({ workspace, expanded, onToggle, onChanged }:
             <DemurrageRiskPanel order={order} calls={workspace.nautaCalls} busy={busy} onResolve={() => void mutate(() => requestJson(`/api/orders/${order.id}/resolve-risk`, { method: "POST" }))} />
             <section><SectionHeader label="Mandate" /><div className="mt-3 grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--line)]"><Metric label="Target" value={money(order.targetPrice, order.currency)} /><Metric label="Maximum" value={money(order.maximumPrice, order.currency)} /><Metric label="Priority" value={priority.value} sub={priority.sub} /><Metric label="Offers required" value={String(order.minimumValidOffers)} sub={`${order.desiredCarriers} desired carriers`} /></div>{(order.preferredArrival || order.mustArriveBy) && <div className="mt-3 rounded-xl bg-[var(--paper)] px-4 py-3 text-sm"><div className="flex justify-between gap-4"><span className="text-[var(--muted)]">Preferred arrival</span><strong>{formatDate(order.preferredArrival)}</strong></div><div className="mt-1 flex justify-between gap-4"><span className="text-[var(--muted)]">Hard deadline</span><strong>{order.mustArriveBy ? formatDate(order.mustArriveBy) : "None"}</strong></div></div>}{order.conditions.length > 0 && <ul className="mt-3 space-y-1.5 text-sm text-[var(--muted)]">{order.conditions.map((condition) => <li key={condition} className="flex gap-2"><Check size={14} className="mt-0.5 shrink-0 text-[var(--signal-dark)]" />{condition}</li>)}</ul>}</section>
 
-            {activeCommitment && <section><SectionHeader label="Commitment" /><div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50/70 p-4"><div className="flex items-start justify-between gap-3"><div><p className="font-semibold text-emerald-950">{activeCommitment.carrierLabel}</p><p className="mt-1 font-mono text-xs uppercase tracking-wider text-emerald-800">Active commitment</p></div><Trophy size={19} className="text-emerald-700" /></div><div className="mt-4 grid gap-2 sm:grid-cols-2"><button disabled={busy} onClick={() => void mutate(() => requestJson(`/api/orders/${order.id}/complete`, { method: "POST" }))} className="rounded-lg bg-emerald-800 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-900">Mark completed</button><button disabled={busy} onClick={invalidateCommitment} className="rounded-lg border border-red-200 bg-white px-3 py-2 text-sm font-semibold text-red-800 hover:bg-red-50">Mark carrier failed</button></div></div></section>}
+            {activeCommitment && <section><SectionHeader label="Commitment" /><div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50/70 p-4"><div className="flex items-start justify-between gap-3"><div><p className="font-semibold text-emerald-950">{activeCommitment.carrierLabel}</p><p className="mt-1 font-mono text-xs uppercase tracking-wider text-emerald-800">Active commitment</p></div><Trophy size={19} className="text-emerald-700" /></div><RecapPanel commitment={activeCommitment} /><div className="mt-4 grid gap-2 sm:grid-cols-2"><button disabled={busy} onClick={() => void mutate(() => requestJson(`/api/orders/${order.id}/complete`, { method: "POST" }))} className="rounded-lg bg-emerald-800 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-900">Mark completed</button><button disabled={busy} onClick={invalidateCommitment} className="rounded-lg border border-red-200 bg-white px-3 py-2 text-sm font-semibold text-red-800 hover:bg-red-50">Mark carrier failed</button></div></div></section>}
 
             {order.lifecycleStatus === "EXCEPTION" && !workspace.markets.some((state) => state.market.reason === "CARRIER_FAILURE" && ["DRAFT", "OPEN", "CALLING", "NEGOTIATING"].includes(state.market.status)) && <button disabled={busy} onClick={() => void mutate(() => requestJson(`/api/orders/${order.id}/markets`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}) }))} className="flex w-full items-center justify-center gap-2 rounded-xl bg-red-700 px-4 py-3 font-semibold text-white"><RotateCcw size={17} /> Create recovery market</button>}
           </div>
@@ -94,6 +94,32 @@ function DemurrageRiskPanel({ order, calls, busy, onResolve }: { order: OrderWor
   </section>;
 }
 
+/**
+ * A verbal agreement the carrier cannot re-read is not evidence. This shows
+ * whether the written record actually reached them, and what it said.
+ */
+function RecapPanel({ commitment }: { commitment: CommitmentRecord }) {
+  const [open, setOpen] = useState(false);
+  if (commitment.recapStatus === "NOT_REQUIRED") return null;
+  const tone = commitment.recapStatus === "SENT" ? "text-emerald-800"
+    : commitment.recapStatus === "FAILED" ? "text-red-800" : "text-amber-800";
+  const label = commitment.recapStatus === "SENT" ? `Written recap sent to ${commitment.recapAddress}`
+    : commitment.recapStatus === "FAILED" ? "Written recap failed"
+      : "Written recap queued";
+  return <div className="mt-3 border-t border-emerald-200 pt-3">
+    <div className="flex items-start gap-2">
+      <FileText size={14} className={`mt-0.5 shrink-0 ${tone}`} />
+      <div className="min-w-0 flex-1">
+        <p className={`text-xs font-semibold ${tone}`}>{label}</p>
+        {commitment.recapSentAt && <p className="font-mono text-[10px] text-emerald-800">{formatDate(commitment.recapSentAt, true)} · {commitment.recapDeliveryId}</p>}
+        {commitment.recapError && <p className="mt-0.5 text-[11px] text-red-800">{commitment.recapError}</p>}
+        {commitment.recapBody && <button type="button" onClick={() => setOpen(!open)} className="mt-1 font-mono text-[10px] uppercase tracking-wider text-emerald-800 hover:underline">{open ? "Hide" : "Show"} what was sent</button>}
+      </div>
+    </div>
+    {open && commitment.recapBody && <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-white/80 p-2 text-[11px] leading-relaxed text-emerald-950">{commitment.recapBody}</pre>}
+  </div>;
+}
+
 function MarketPanel({ market, busy, onStart, onAddOffer, onCommit }: { market: MarketState; busy: boolean; onStart: () => void; onAddOffer: () => void; onCommit: (offer: OfferRecord) => void }) {
   const canStart = market.market.status === "DRAFT" && market.progress.callsStarted === 0;
   const canAddOffer = ["DRAFT", "OPEN", "CALLING", "NEGOTIATING", "HUMAN_REVIEW"].includes(market.market.status);
@@ -111,7 +137,34 @@ function MarketPanel({ market, busy, onStart, onAddOffer, onCommit }: { market: 
 
 function CarrierRow({ carrier, canCommit, onCommit }: { carrier: MarketCarrierState; canCommit: boolean; onCommit: (offer: OfferRecord) => void }) {
   const offer = carrier.latestOffer;
-  return <tr className={carrier.rank === 1 ? "best-row" : ""}><td><div className="font-semibold">{carrier.carrier.label}</div>{carrier.latestCall && <><div className="mt-0.5 font-mono text-[10px] text-[var(--muted)]">Call {displayStatus(carrier.latestCall.status)}</div>{carrier.latestCall.errorMessage && <div className="mt-1 max-w-xs text-xs text-red-700">{carrier.latestCall.errorMessage}</div>}</>}</td><td>{offer ? <><span className="font-semibold">{money(offer.price, offer.currency)}</span>{!offer.isValid && <span className="ml-2 text-[10px] font-semibold uppercase text-red-700">Infeasible</span>}{offer.missingFields.length > 0 && <span className="mt-0.5 block text-[10px] text-[var(--muted)]">Missing {offer.missingFields.join(", ")}</span>}</> : "—"}</td><td>{formatDate(offer?.expectedArrival || null, true)}</td><td><span className="font-mono text-[10px] uppercase tracking-wider">{displayStatus(carrier.status)}</span><span className="mt-0.5 block text-[10px] text-[var(--muted)]">{displayStatus(carrier.instruction.action)}</span></td><td>{carrier.rank ? <span className="rank-chip">{carrier.rank}</span> : "—"}</td><td className="text-right">{offer && canCommit && <button onClick={() => onCommit(offer)} className="rounded-lg bg-[var(--ink)] px-3 py-1.5 text-xs font-semibold text-white">Commit</button>}</td></tr>;
+  return <tr className={carrier.rank === 1 ? "best-row" : ""}><td><div className="font-semibold">{carrier.carrier.label}</div>{carrier.latestCall && <><div className="mt-0.5 font-mono text-[10px] text-[var(--muted)]">Call {displayStatus(carrier.latestCall.status)}</div>{carrier.latestCall.errorMessage && <div className="mt-1 max-w-xs text-xs text-red-700">{carrier.latestCall.errorMessage}</div>}</>}</td><td>{offer ? <><span className="font-semibold">{money(offer.price, offer.currency)}</span>{!offer.isValid && <span className="ml-2 text-[10px] font-semibold uppercase text-red-700">Infeasible</span>}{offer.missingFields.length > 0 && <span className="mt-0.5 block text-[10px] text-[var(--muted)]">Missing {offer.missingFields.join(", ")}</span>}{offer.evidence && <EvidenceButton offer={offer} />}</> : "—"}</td><td>{formatDate(offer?.expectedArrival || null, true)}</td><td><span className="font-mono text-[10px] uppercase tracking-wider">{displayStatus(carrier.status)}</span><span className="mt-0.5 block text-[10px] text-[var(--muted)]">{displayStatus(carrier.instruction.action)}</span></td><td>{carrier.rank ? <span className="rank-chip">{carrier.rank}</span> : "—"}</td><td className="text-right">{offer && canCommit && <button onClick={() => onCommit(offer)} className="rounded-lg bg-[var(--ink)] px-3 py-1.5 text-xs font-semibold text-white">Commit</button>}</td></tr>;
+}
+
+/**
+ * The proof behind a recorded number: what the carrier said, and the audio at
+ * the moment they said it. Without this an offer is only an assertion.
+ */
+function EvidenceButton({ offer }: { offer: OfferRecord }) {
+  const [open, setOpen] = useState(false);
+  const evidence = offer.evidence!;
+  const seconds = evidence.offsetMs !== null ? Math.max(0, Math.floor(evidence.offsetMs / 1000)) : null;
+  if (!evidence.audioUrl && !evidence.rawStatement) return null;
+  return <div className="mt-1">
+    <button type="button" onClick={() => setOpen(!open)} className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wider text-[var(--muted)] hover:text-[var(--ink)]">
+      <Volume2 size={12} /> Evidence{seconds !== null ? ` · ${formatOffset(seconds)}` : ""}
+    </button>
+    {open && <div className="mt-1.5 max-w-xs rounded-lg border border-[var(--line)] bg-[var(--paper)] p-2">
+      {evidence.rawStatement && <p className="text-xs italic text-[var(--ink)]">&ldquo;{evidence.rawStatement}&rdquo;</p>}
+      {evidence.audioUrl
+        ? <audio controls preload="none" className="mt-1.5 w-full" src={`${evidence.audioUrl}${seconds ? `#t=${seconds}` : ""}`} />
+        : <p className="mt-1 text-[10px] text-[var(--muted)]">Audio not available. Set RECORD_CALLS=true before the call to capture it.</p>}
+      <p className="mt-1 font-mono text-[10px] text-[var(--muted)]">Captured {formatDate(evidence.capturedAt, true)}</p>
+    </div>}
+  </div>;
+}
+
+function formatOffset(seconds: number): string {
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
 function OfferModal({ market, onClose, onSaved }: { market: MarketState; onClose: () => void; onSaved: () => Promise<void> }) {

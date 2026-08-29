@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { apiError } from "@/lib/http";
 import { getOrderMarketService } from "@/lib/market-service";
+import { flushAwardRecaps } from "@/lib/recap-service";
 
 export const runtime = "nodejs";
 
@@ -38,6 +39,11 @@ export async function GET() {
   try {
     const service = getOrderMarketService();
     service.reevaluateExpiredMarkets();
+    // The dashboard poll is also the recap heartbeat, so a written record that
+    // failed to send once is retried without operator action.
+    await flushAwardRecaps(service).catch((error) => {
+      console.warn("Recap flush failed", error);
+    });
     return Response.json({ orders: service.listOrders() });
   } catch (error) {
     return apiError(error);
