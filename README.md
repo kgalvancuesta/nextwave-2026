@@ -2,7 +2,7 @@
 
 Initial scaffold for a server-controlled freight voice agent. The service keeps policy and operation state outside the voice model, accepts OpenAI Realtime SIP calls, exposes a sideband control channel, and delegates outbound dialing and written recaps through provider-neutral HTTP adapters.
 
-This is not production telephony yet. A telephony provider must originate outbound PSTN calls and record audio, and a recap provider must deliver SMS/email. The current interfaces make those dependencies explicit instead of simulating successful delivery.
+This is not production telephony yet. A telephony provider must originate outbound PSTN calls and record audio, and a recap provider must deliver SMS/email. The current interfaces make those dependencies explicit instead of simulating successful delivery
 
 ## Architecture
 
