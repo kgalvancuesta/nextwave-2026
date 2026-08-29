@@ -87,8 +87,8 @@ export function NewOrderModal({ contacts, onClose, onCreated, onAddCarrier }: Pr
           <section className="border-t border-[var(--line)] pt-7">
             <SectionTitle number="02" title="Mandate" description="Target the agent should pursue and the hard authorization boundary." />
             <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              <Field label="Target price"><div className="relative"><span className="absolute left-3 top-3 text-sm text-[var(--muted)]">$</span><input required type="number" min="0" step="1" className="field-input pl-7" value={draft.targetPrice} onChange={(e) => update("targetPrice", e.target.value)} placeholder="8000" /></div></Field>
-              <Field label="Maximum price"><div className="relative"><span className="absolute left-3 top-3 text-sm text-[var(--muted)]">$</span><input required type="number" min="0" step="1" className="field-input pl-7" value={draft.maximumPrice} onChange={(e) => update("maximumPrice", e.target.value)} placeholder="9000" /></div></Field>
+              <Field label="Target price"><div className="relative"><span className="currency-prefix">$</span><input required type="number" min="0" step="1" className="field-input currency-input" value={draft.targetPrice} onChange={(e) => update("targetPrice", e.target.value)} placeholder="8000" /></div></Field>
+              <Field label="Maximum price"><div className="relative"><span className="currency-prefix">$</span><input required type="number" min="0" step="1" className="field-input currency-input" value={draft.maximumPrice} onChange={(e) => update("maximumPrice", e.target.value)} placeholder="9000" /></div></Field>
               <Field label="Preferred arrival"><input type="datetime-local" className="field-input" value={draft.preferredArrival} onChange={(e) => update("preferredArrival", e.target.value)} /></Field>
               <Field label="Must arrive by"><input type="datetime-local" className="field-input" value={draft.mustArriveBy} onChange={(e) => update("mustArriveBy", e.target.value)} /></Field>
             </div>

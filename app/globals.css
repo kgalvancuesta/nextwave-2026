@@ -50,6 +50,19 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 
 .field-input::placeholder { color: #8b9591; }
 
+.currency-input { padding-left: 2.25rem; }
+
+.currency-prefix {
+  position: absolute;
+  left: 0.875rem;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  color: var(--muted);
+  font-size: 0.875rem;
+  line-height: 1;
+}
+
 .eyebrow {
   font-family: var(--font-geist-mono);
   font-size: 0.68rem;
