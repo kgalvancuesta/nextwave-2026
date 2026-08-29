@@ -1,68 +1,128 @@
-# Nextwave voice operations control plane
+# Marketline telephony milestone
 
-Initial scaffold for a server-controlled freight voice agent. The service keeps policy and operation state outside the voice model, accepts OpenAI Realtime SIP calls, exposes a sideband control channel, and delegates outbound dialing and written recaps through provider-neutral HTTP adapters.
+Marketline is a small Next.js dashboard for proving the PSTN substrate of a future carrier-market voice agent. It stores an editable carrier phonebook, starts up to three real Twilio calls concurrently, receives inbound Twilio calls, polls live status, and preserves call/recording history in SQLite.
 
-This is not production telephony yet. A telephony provider must originate outbound PSTN calls and record audio, and a recap provider must deliver SMS/email. The current interfaces make those dependencies explicit instead of simulating successful delivery
+There is no AI, speech recognition, negotiation, mandate, commitment, or OpenAI integration in this milestone. Answered calls play an explicit placeholder TwiML message.
 
 ## Architecture
 
 ```text
-PSTN <-> telephony/SIP provider <-> OpenAI Realtime SIP
-                                      | sideband WebSocket
-                                      v
-                               this control plane
-                        mandate | tools | state | audit
-                              /                 \
-                  outbound dialer webhook    recap webhook
+Dashboard -> Next.js route handlers -> Call service -> TelephonyProvider
+                                      |                 |
+                                      |                 +-- TwilioTelephonyProvider
+                                      |
+                                      +-- SQLite repository
+
+Twilio webhooks -> signature validation -> call persistence
+                                      |
+                                      +-- VoiceSessionAdapter
+                                             +-- PlaceholderVoiceSessionAdapter
 ```
 
-Core invariants:
+The future realtime agent belongs in a new `VoiceSessionAdapter` implementation. Contact storage, batch creation, Twilio status handling, call history, and the dashboard do not need to change.
 
-- The model may propose a commitment; deterministic code approves it against the operation mandate.
-- A commitment remains `proposed` until call completion triggers a written recap.
-- A commitment becomes `effective` only after the recap adapter confirms delivery.
-- Every commitment requires an audio evidence range and conversation item ID.
-- Uncorrelated inbound calls start in restricted intake mode and must identify an operation before negotiating.
-- Human escalation transfers the live SIP call; it does not hang up first.
+## 1. Install and initialize
 
-## Run locally
+Requirements: Node.js 22 or newer, npm, a Twilio account, a voice-capable Twilio phone number, and ngrok or another HTTPS tunnel.
 
 ```bash
-cp .env.example .env
 npm install
+cp .env.example .env.local
+mkdir -p secrets
+cp docs/twilio-credentials.example.md secrets/twilio.md
+npm run db:migrate
+```
+
+Put the real Twilio values in `secrets/twilio.md` using the exact documented key names. `secrets/` is gitignored. Environment variables `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_PHONE_NUMBER` remain supported and override the file.
+
+Start the app:
+
+```bash
 npm run dev
 ```
 
-Useful checks:
+Open [http://localhost:3000](http://localhost:3000).
+
+## 2. Expose the app
+
+In another terminal:
 
 ```bash
-npm test
-npm run typecheck
+ngrok http 3000
 ```
 
-## API surface
+Copy the generated HTTPS origin, for example `https://abc123.ngrok.app`, into `.env.local`:
 
-- `POST /v1/operations` creates an operation and mandate.
-- `GET /v1/operations/:id` returns the operation, calls, events, and commitments.
-- `POST /v1/operations/:id/calls` requests an outbound carrier call.
-- `POST /v1/webhooks/openai` verifies and handles `realtime.call.incoming`.
-- `POST /v1/calls/:id/control` injects context, transfers, or hangs up.
-- `POST /v1/calls/:id/complete` closes a call and delivers recaps for approved proposals.
+```text
+PUBLIC_BASE_URL=https://abc123.ngrok.app
+```
 
-See `.env.example` for provider contracts. The outbound adapter receives the destination, internal correlation IDs, and OpenAI SIP URI. The recap adapter receives a delivery target and structured commitment recap.
+Set a strong `DASHBOARD_PASSWORD` if you will open Marketline through that public URL. Without one, the dashboard and call-control APIs work on localhost but reject public-tunnel access; Twilio webhook routes remain reachable and signature-protected. Restart `npm run dev` after changing `.env.local`.
 
-## OpenAI SIP setup
+Do not use localhost in `PUBLIC_BASE_URL`; Twilio must reach the application over public HTTPS.
 
-1. Configure an OpenAI project webhook pointing to `/v1/webhooks/openai`.
-2. Configure the SIP trunk to route calls to `sip:$PROJECT_ID@sip.api.openai.com;transport=tls`.
-3. Preserve `X-Internal-Call-ID` and `X-Operation-ID` SIP headers on outbound calls when the provider supports custom headers.
-4. Set `OPENAI_API_KEY`, `OPENAI_WEBHOOK_SECRET`, and `OPENAI_SIP_URI`.
+## 3. Configure the Twilio number
 
-## Explicitly deferred
+In Twilio Console:
 
-- A concrete Twilio/provider adapter and callback signature verification.
-- Durable background jobs and automatic retries for dial and recap delivery. Repeating the completion request retries failed recaps.
-- Provider recording ingestion and authoritative audio-offset reconciliation.
-- Carrier identity/voice verification and synthetic-agent detection.
-- Three-carrier market scheduling, quote comparison, and winner selection.
-- Multi-instance sideband ownership, reconnects, and distributed locking.
+1. Open **Phone Numbers → Manage → Active numbers**.
+2. Select the phone number stored as `TWILIO_PHONE_NUMBER`.
+3. Under **Voice Configuration**, set **Configure with** to **Webhook**.
+4. Set **A call comes in** to:
+   - URL: `https://YOUR-NGROK-HOST/api/twilio/voice/inbound`
+   - Method: `HTTP POST`
+5. Set **Call Status Changes** to:
+   - URL: `https://YOUR-NGROK-HOST/api/twilio/status`
+   - Method: `HTTP POST`
+6. Save the number configuration.
+
+The second webhook is essential. Without it, an inbound call cannot reliably leave the dashboard's Active Calls list after hanging up.
+
+Outbound calls configure these callbacks automatically:
+
+- TwiML: `/api/twilio/voice/outbound`
+- Lifecycle: `/api/twilio/status`
+- Recording state when enabled: `/api/twilio/recording`
+
+Twilio signatures are validated against `PUBLIC_BASE_URL` by default. A rejected callback is logged and returns HTTP 403. `TWILIO_VALIDATE_SIGNATURES=false` exists only for development diagnosis and is rejected when `NODE_ENV=production`.
+
+## 4. Twilio account checks
+
+- Open **Voice → Settings → Geo Permissions** and enable every destination country needed for the demo.
+- Trial accounts can call only verified recipient numbers. Verify all three test numbers or upgrade the account.
+- Confirm the account has funds and the selected Twilio number has Voice capability.
+- Regulations and geographic permissions can make a valid E.164 number uncallable. Marketline reports the Twilio error separately from phone-number validation.
+
+## 5. First live test
+
+1. Add three contacts in Marketline. Mexican national-format numbers use `MX` as the default region; international numbers should include `+` and country code.
+2. Edit any saved entry to verify the normalized E.164 number updates persistently.
+3. Select three contacts and press **Call selected (3)**.
+4. Verify three independent Twilio Call SIDs are created and each card changes through initiated, ringing, and in progress independently.
+5. Answer a call and confirm the placeholder says the voice agent is not connected.
+6. Call the Twilio number from a real phone. Confirm the inbound placeholder and the inbound record in Marketline.
+7. Hang up and confirm the call moves from Active Calls to Recent Calls.
+
+The three Twilio REST requests use `Promise.allSettled`; one rejected destination does not stop the others.
+
+## Recording groundwork
+
+Set `RECORD_CALLS=true` only after reviewing recording-consent requirements for every applicable jurisdiction. Marketline then:
+
+- discloses that the call may be recorded;
+- requests dual-channel Twilio recording;
+- stores recording SID, call SID, status, Twilio URL, duration, and start time;
+- does not download or duplicate audio locally.
+
+## Commands
+
+```bash
+npm run dev
+npm run db:migrate
+npm run typecheck
+npm run lint
+npm test
+npm run build
+```
+
+The SQLite file defaults to `data/marketline.db` and is gitignored. Migrations are additive and do not clear saved contacts or call history.

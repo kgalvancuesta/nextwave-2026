@@ -1,26 +1,39 @@
 {
-  "name": "nextwave-voice-control-plane",
+  "name": "marketline-telephony",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24" },
+  "engines": { "node": ">=22" },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "dev": "tsx watch src/server.ts",
-    "start": "node dist/src/server.js",
-    "test": "tsx --test test/**/*.test.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "dev": "next dev",
+    "build": "next build --webpack",
+    "start": "next start",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "db:migrate": "tsx scripts/migrate.ts"
   },
   "dependencies": {
-    "fastify": "5.12.1",
-    "openai": "7.8.0",
-    "ws": "8.21.3",
+    "better-sqlite3": "13.0.3",
+    "libphonenumber-js": "1.13.12",
+    "lucide-react": "1.37.0",
+    "next": "16.3.3",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "twilio": "6.1.0",
     "zod": "4.5.2"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
-    "@types/ws": "^8.18.0",
+    "@tailwindcss/postcss": "4.3.3",
+    "@types/better-sqlite3": "9.6.0",
+    "@types/node": "26.4.0",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "eslint": "9.39.5",
+    "eslint-config-next": "16.3.3",
+    "tailwindcss": "4.3.3",
     "tsx": "4.23.12",
-    "typescript": "7.0.2"
+    "typescript": "6.0.3",
+    "vitest": "4.1.11"
   }
 }
