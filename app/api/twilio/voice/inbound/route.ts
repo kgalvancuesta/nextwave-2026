@@ -4,7 +4,7 @@ import { apiError, twimlResponse } from "@/lib/http";
 import { getRepository } from "@/lib/repository";
 import { TwilioTelephonyProvider } from "@/lib/telephony";
 import { parseTwilioForm, validateTwilioWebhook } from "@/lib/twilio-webhook";
-import { placeholderVoiceSession } from "@/lib/voice-session";
+import { resolveVoiceSession } from "@/lib/voice-session";
 
 export const runtime = "nodejs";
 
@@ -19,7 +19,7 @@ export async function POST(request: Request) {
     const result = await handleInboundCall({
       params,
       repository: getRepository(),
-      voiceSession: placeholderVoiceSession,
+      voiceSession: resolveVoiceSession(),
       recordingEnabled: config.recordCalls,
     });
     if (config.recordCalls) {

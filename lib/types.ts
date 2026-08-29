@@ -65,6 +65,8 @@ export interface RecordingRecord {
 
 export interface CallContext {
   callSid: string;
+  /** The ledger row for this call, when the leg is already correlated. */
+  internalCallId: string | null;
   direction: CallDirection;
   fromNumber: string;
   toNumber: string;

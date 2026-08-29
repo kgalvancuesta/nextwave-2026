@@ -165,6 +165,69 @@ export const migrations = [
       "CREATE INDEX idx_calls_market_created ON calls(market_id, created_at DESC)",
     ],
   },
+  {
+    // The Volta voice agent keeps its negotiation state in its own tables and
+    // its own columns on `calls`. The order/market tables above are owned by
+    // the dashboard; nothing here writes to them.
+    id: "003_volta_agent_state",
+    statements: [
+      `CREATE TABLE IF NOT EXISTS volta_operations (
+        id TEXT PRIMARY KEY,
+        external_reference TEXT NOT NULL UNIQUE,
+        payload TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS volta_markets (
+        id TEXT PRIMARY KEY,
+        operation_id TEXT NOT NULL REFERENCES volta_operations(id) ON DELETE CASCADE,
+        status TEXT NOT NULL CHECK(status IN (
+          'open', 'collecting_quotes', 'ready_for_selection', 'selected', 'exhausted', 'cancelled'
+        )),
+        candidates TEXT NOT NULL,
+        selected_quote_id TEXT,
+        created_at TEXT NOT NULL,
+        closed_at TEXT
+      )`,
+      `CREATE TABLE IF NOT EXISTS volta_quotes (
+        id TEXT PRIMARY KEY,
+        market_id TEXT NOT NULL REFERENCES volta_markets(id) ON DELETE CASCADE,
+        call_id TEXT NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
+        carrier TEXT NOT NULL,
+        terms TEXT NOT NULL,
+        mandate_decision TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS volta_commitments (
+        id TEXT PRIMARY KEY,
+        operation_id TEXT NOT NULL REFERENCES volta_operations(id) ON DELETE CASCADE,
+        call_id TEXT NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
+        status TEXT NOT NULL CHECK(status IN ('proposed', 'effective', 'recap_failed')),
+        proposal TEXT NOT NULL,
+        mandate_decision TEXT NOT NULL,
+        recap_delivery_id TEXT,
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS volta_call_events (
+        id TEXT PRIMARY KEY,
+        call_id TEXT NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
+        type TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        occurred_at TEXT NOT NULL
+      )`,
+      "ALTER TABLE calls ADD COLUMN volta_operation_id TEXT",
+      "ALTER TABLE calls ADD COLUMN volta_market_id TEXT",
+      "ALTER TABLE calls ADD COLUMN volta_status TEXT",
+      "ALTER TABLE calls ADD COLUMN volta_counterparty TEXT",
+      "ALTER TABLE calls ADD COLUMN realtime_call_id TEXT",
+      "CREATE UNIQUE INDEX IF NOT EXISTS idx_calls_realtime_call_id ON calls(realtime_call_id) WHERE realtime_call_id IS NOT NULL",
+      "CREATE INDEX IF NOT EXISTS idx_calls_volta_operation_id ON calls(volta_operation_id)",
+      "CREATE INDEX IF NOT EXISTS idx_calls_volta_market_id ON calls(volta_market_id)",
+      "CREATE INDEX IF NOT EXISTS idx_volta_markets_operation_id ON volta_markets(operation_id)",
+      "CREATE INDEX IF NOT EXISTS idx_volta_quotes_market_id ON volta_quotes(market_id)",
+      "CREATE INDEX IF NOT EXISTS idx_volta_commitments_call_id ON volta_commitments(call_id)",
+      "CREATE INDEX IF NOT EXISTS idx_volta_call_events_call_id ON volta_call_events(call_id, occurred_at)",
+    ],
+  },
 ] as const;
 
 export function applyMigrations(db: Database.Database): string[] {

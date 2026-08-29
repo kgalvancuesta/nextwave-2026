@@ -2,7 +2,7 @@
 
 Marketline is an operational Next.js dashboard for ground-transport procurement. It manages persistent orders, mandate snapshots, carrier markets, historical offers, commitments, recovery markets, and the existing Twilio phone system in one authoritative SQLite state.
 
-There is no AI, speech recognition, or autonomous negotiation in this milestone. Offers and commitments are entered manually. Answered calls still play an explicit placeholder TwiML message until a future voice adapter replaces it.
+On top of that substrate runs the Volta voice layer: an OpenAI Realtime agent that phones carriers, records what they offer, and is bounded by deterministic policy rather than by its prompt. It keeps its own negotiation state in `volta_*` tables and does not write to the order/market records the dashboard owns. Without `OPENAI_API_KEY` the telephony harness runs exactly as before and answered calls play the placeholder TwiML message.
 
 ## Architecture
 
@@ -13,11 +13,73 @@ Future agents ───┼─> OrderMarketService ─> normalized SQLite state
 Twilio webhooks ─┘        └─> derived market state and deterministic offer scoring
 
 Market call action -> existing Call service -> TwilioTelephonyProvider -> PSTN
+
+Twilio webhooks -> signature validation -> call persistence
+                                      |
+                                      +-- VoiceSessionAdapter
+                                             +-- PlaceholderVoiceSessionAdapter
+                                             +-- SipBridgeVoiceSessionAdapter
+                                                    |
+                                                    v
+                                             OpenAI Realtime (SIP)
+                                                    |
+                                             Volta agent + policy
 ```
 
 Orders and markets are separate records. Every market preserves its mandate snapshot, and every offer is immutable; a newer carrier offer links to the offer it supersedes. Calls link to order, market, and carrier. A partial unique index prevents two active commitments for the same market. The dashboard and future agents consume the same derived `getMarketState` result.
 
-The future realtime agent belongs in a new `VoiceSessionAdapter` implementation and can use `getOrder`, `getMarketState`, and `recordOffer` without sharing LLM conversation state between carrier calls.
+The realtime agent arrived as a new `VoiceSessionAdapter`, exactly where this README said it belonged. Contact storage, batch creation, Twilio status handling, call history, and the dashboard did not change.
+
+## The Volta voice layer
+
+```text
+lib/volta/
+  models.ts / mandate.ts / carriers.ts   the mandate and its deterministic checks
+  ports.ts                               the interfaces the policy depends on
+  store.ts                               negotiation state in the volta_* tables
+  voice-control-service.ts               every decision the agent is not allowed to make
+  gateways.ts / sip.ts / service.ts      Twilio dialling, SIP correlation, wiring
+  agent/                                 the OpenAI Agents SDK agent
+  openai-agents-runtime.ts               RealtimeSession lifecycle and audit trail
+```
+
+How a voice recovery runs:
+
+1. `POST /api/operations` records the mandate the agent must stay inside: price
+   ceiling, pickup window, prohibited terms, detention cap.
+2. `POST /api/operations/:id/carrier-markets` dials at least three distinct
+   carriers concurrently. They are ordinary rows in `calls`, so the dashboard,
+   the status callbacks and the recordings apply to them unchanged.
+3. Twilio answers and fetches the answer TwiML, which bridges the leg into
+   OpenAI Realtime over SIP. The call and operation IDs travel as SIP headers
+   issued by the server, never by the model.
+4. `POST /api/webhooks/openai` accepts the Realtime call, briefs the agent from
+   server state and attaches the sideband session.
+5. The agent records each quote through `record_carrier_quote`. Eligible and
+   rejected offers are both stored with their mandate verdict and audio evidence.
+6. `POST /api/carrier-markets/:id/select-best` picks the winner
+   deterministically: mandate-valid first, then lower rate, earlier pickup,
+   higher reliability.
+7. `POST /api/carrier-markets/:id/confirm` calls the winner back to read the
+   exact terms. Only there can the agent reach `propose_commitment`.
+8. `POST /api/calls/:id/complete` sends the SMS recap, which is what turns a
+   `proposed` commitment into an `effective` one.
+
+Invariants worth knowing before changing this code:
+
+- The model proposes; deterministic code approves against the mandate.
+- The tool surface is the policy boundary, not the prompt. A quote call cannot
+  reach `propose_commitment` at all, and an unidentified inbound call cannot
+  reach any commercial tool. A live call is re-briefed only when server state
+  grants it a wider surface.
+- A commitment stays `proposed` until the written recap is delivered.
+- A market winner must be selected before any market call may commit, and the
+  final terms must match the selected quote exactly.
+- Uncorrelated legs are never bridged to the agent.
+
+This layer and the dashboard's own order/market service are two separate
+implementations of the same business idea. They share the call ledger and
+nothing else; converging them is deliberate future work.
 
 ## 1. Install and initialize
 

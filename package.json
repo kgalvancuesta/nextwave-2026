@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build --webpack",
@@ -15,10 +17,13 @@
     "twilio:configure": "tsx scripts/twilio-configure.ts"
   },
   "dependencies": {
+    "@openai/agents": "0.17.0",
+    "@openai/agents-realtime": "0.17.0",
     "better-sqlite3": "13.0.3",
     "libphonenumber-js": "1.13.12",
     "lucide-react": "1.37.0",
     "next": "16.3.3",
+    "openai": "7.8.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "twilio": "6.1.0",

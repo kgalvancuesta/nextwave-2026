@@ -19,10 +19,16 @@ export function apiError(error: unknown): Response {
   if (/Select between|no longer exist|omitted|valid phone/i.test(message)) {
     return Response.json({ error: message }, { status: 400 });
   }
+  if (/not found/i.test(message)) {
+    return Response.json({ error: message }, { status: 404 });
+  }
+  if (/minimum_carrier_calls_not_met|no_eligible_quotes|carrier_market_has_no_selected_quote|duplicate carrier candidate|already selected|no longer available/i.test(message)) {
+    return Response.json({ error: message }, { status: 409 });
+  }
   if (/market|offer|carrier|commitment|price|weight|mandate|invalidation reason|required before/i.test(message)) {
     return Response.json({ error: message }, { status: 400 });
   }
-  if (/Missing Twilio|PUBLIC_BASE_URL|forbidden in production/i.test(message)) {
+  if (/Missing Twilio|Missing OpenAI|PUBLIC_BASE_URL|forbidden in production/i.test(message)) {
     return Response.json({ error: message }, { status: 503 });
   }
   if (/no such table/i.test(message)) {

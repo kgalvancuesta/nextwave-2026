@@ -66,6 +66,44 @@ export function loadTelephonyConfig(): TelephonyConfig {
   };
 }
 
+export interface VoltaConfig {
+  openAiApiKey: string;
+  openAiWebhookSecret: string;
+  realtimeModel: string;
+  voice: string;
+  /** The OpenAI Realtime SIP endpoint Twilio bridges answered calls into. */
+  sipUri: string;
+  humanEscalationUri: string | null;
+}
+
+/**
+ * The voice agent is optional: the telephony dashboard runs without it. Every
+ * caller that needs the agent asks for this config explicitly and fails loudly
+ * rather than silently answering a carrier with no negotiation policy loaded.
+ */
+export function loadVoltaConfig(): VoltaConfig {
+  const openAiApiKey = process.env.OPENAI_API_KEY?.trim();
+  const openAiWebhookSecret = process.env.OPENAI_WEBHOOK_SECRET?.trim();
+  const sipUri = process.env.OPENAI_SIP_URI?.trim();
+  const missing = [
+    openAiApiKey ? null : "OPENAI_API_KEY",
+    openAiWebhookSecret ? null : "OPENAI_WEBHOOK_SECRET",
+    sipUri ? null : "OPENAI_SIP_URI",
+  ].filter((name): name is string => name !== null);
+  if (missing.length > 0) {
+    throw new Error(`Missing OpenAI voice configuration: ${missing.join(", ")}.`);
+  }
+
+  return {
+    openAiApiKey: openAiApiKey!,
+    openAiWebhookSecret: openAiWebhookSecret!,
+    realtimeModel: process.env.OPENAI_REALTIME_MODEL?.trim() || "gpt-realtime",
+    voice: process.env.OPENAI_VOICE?.trim() || "marin",
+    sipUri: sipUri!,
+    humanEscalationUri: process.env.HUMAN_ESCALATION_URI?.trim() || null,
+  };
+}
+
 function parsePublicBaseUrl(input: string | undefined): string {
   if (!input?.trim()) throw new Error("PUBLIC_BASE_URL is required for Twilio callbacks.");
   const url = new URL(input.trim());

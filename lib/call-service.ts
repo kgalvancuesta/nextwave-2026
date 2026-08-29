@@ -52,6 +52,7 @@ export async function handleInboundCall(input: {
   });
   const response = await input.voiceSession.handleInboundCall({
     callSid,
+    internalCallId: call.id,
     direction: "INBOUND",
     fromNumber,
     toNumber,
@@ -75,6 +76,7 @@ export async function handleOutboundAnswer(input: {
   const call = existing ? input.repository.updateCallStatus(callSid, "IN_PROGRESS", input.params) : null;
   return input.voiceSession.handleOutboundCall({
     callSid,
+    internalCallId: existing?.id ?? null,
     direction: "OUTBOUND",
     fromNumber,
     toNumber,
