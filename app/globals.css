@@ -49,6 +49,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 }
 
 .field-input::placeholder { color: #8b9591; }
+.field-input[aria-invalid="true"] { border-color: #b91c1c; background: #fff7f7; }
 
 .currency-input { padding-left: 2.25rem; }
 

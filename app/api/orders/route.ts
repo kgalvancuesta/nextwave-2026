@@ -22,6 +22,10 @@ const orderSchema = z.object({
   desiredCarriers: z.number().int().min(1).max(3).default(3),
   conditions: z.array(z.string().trim().min(1).max(500)).max(20).default([]),
   carrierIds: z.array(z.string().uuid()).min(1).max(3),
+}).superRefine((order, context) => {
+  if (order.mustArriveBy && order.preferredArrival && Date.parse(order.mustArriveBy) < Date.parse(order.preferredArrival)) {
+    context.addIssue({ code: "custom", path: ["mustArriveBy"], message: "Must arrive by cannot be before preferred arrival." });
+  }
 });
 
 export async function GET() {

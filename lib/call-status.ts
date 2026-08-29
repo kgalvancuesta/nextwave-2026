@@ -1,4 +1,4 @@
-import type { CallStatus } from "./types";
+import type { CallRecord, CallStatus, InboundCallState } from "./types";
 
 const terminalStatuses = new Set<CallStatus>(["COMPLETED", "BUSY", "NO_ANSWER", "FAILED", "CANCELED"]);
 
@@ -32,4 +32,21 @@ export function isTerminalCallStatus(status: CallStatus): boolean {
 
 export function isActiveCallStatus(status: CallStatus): boolean {
   return !isTerminalCallStatus(status);
+}
+
+/**
+ * Derives the app-visible inbound call state from the full list of call records.
+ * The backend calls this before sending the /api/calls response so the frontend
+ * never has to maintain its own state machine.
+ *
+ * Priority: in_progress > incoming > idle
+ */
+export function deriveInboundCallState(calls: CallRecord[]): InboundCallState {
+  let incoming = false;
+  for (const call of calls) {
+    if (call.direction !== "INBOUND" || isTerminalCallStatus(call.status)) continue;
+    if (call.status === "IN_PROGRESS") return "in_progress";
+    incoming = true;
+  }
+  return incoming ? "incoming" : "idle";
 }

@@ -396,6 +396,9 @@ function validateOrderInput(input: CreateOrderInput) {
     throw new Error("Maximum price must be a whole amount greater than or equal to target price.");
   }
   if (Math.abs(input.priceWeight + input.speedWeight - 1) > 0.001) throw new Error("Price and speed weights must add up to 1.");
+  if (input.mustArriveBy && input.preferredArrival && Date.parse(input.mustArriveBy) < Date.parse(input.preferredArrival)) {
+    throw new Error("Must arrive by cannot be before preferred arrival.");
+  }
   if (input.carrierIds.length < 1 || input.carrierIds.length > 3 || new Set(input.carrierIds).size !== input.carrierIds.length) {
     throw new Error("Select between one and three unique carriers.");
   }

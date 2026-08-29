@@ -8,12 +8,16 @@ export interface VoiceSessionAdapter {
   handleOutboundCall(context: CallContext): Promise<VoiceResponse>;
 }
 
+/**
+ * Interim greeting spoken to every inbound caller until the full voice agent is wired up.
+ * Update this string to change what callers hear.
+ */
+export const INBOUND_INTERIM_MESSAGE =
+  "Thank you for calling Nextwave. Our automated phone service is currently being set up. Please try again soon.";
+
 export class PlaceholderVoiceSessionAdapter implements VoiceSessionAdapter {
   async handleInboundCall(context: CallContext): Promise<VoiceResponse> {
-    return this.build(
-      context,
-      "You have reached Marketline. Incoming calling is connected. The voice agent is not connected yet.",
-    );
+    return this.build(context, INBOUND_INTERIM_MESSAGE);
   }
 
   async handleOutboundCall(context: CallContext): Promise<VoiceResponse> {

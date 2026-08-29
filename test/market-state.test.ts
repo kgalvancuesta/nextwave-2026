@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createTestContext } from "./helpers";
 
-function setup(minimumValidOffers = 1) {
+function setup(minimumValidOffers = 1, mustArriveBy: string | null = "2030-01-10T18:00:00.000Z") {
   const context = createTestContext();
   const carriers = [
     context.repository.createContact({ label: "Rivera", phoneInput: "+12025550100", e164PhoneNumber: "+12025550100" }),
@@ -11,7 +11,7 @@ function setup(minimumValidOffers = 1) {
   const workspace = context.markets.createOrder({
     name: "Textiles Pacifico", client: "Textiles Pacifico", origin: "Manzanillo", destination: "Guadalajara",
     currency: "MXN", targetPrice: 8_000, maximumPrice: 9_000,
-    preferredArrival: "2030-01-10T12:00:00.000Z", mustArriveBy: "2030-01-10T18:00:00.000Z",
+    preferredArrival: "2030-01-10T12:00:00.000Z", mustArriveBy,
     priceWeight: 0.65, speedWeight: 0.35, minimumValidOffers, desiredCarriers: 3,
     conditions: ["Tolls included"], carrierIds: carriers.map((carrier) => carrier.id),
   });
@@ -46,5 +46,15 @@ describe("derived market state", () => {
     expect(state.progress.validOffers).toBe(0);
     expect(state.bestOffer).toBeNull();
     expect(state.offers.every((offer) => !offer.isValid)).toBe(true);
+  });
+
+  it("does not invalidate a late offer when the hard deadline is disabled", () => {
+    const { markets, carriers, marketId, workspace } = setup(1, null);
+    expect(workspace.order.mustArriveBy).toBeNull();
+    expect(workspace.currentMarket?.market.mandate.mustArriveBy).toBeNull();
+    markets.recordOffer(marketId, { carrierId: carriers[0]!.id, price: 8_200, expectedArrival: "2030-01-12T19:00:00.000Z" });
+    const state = markets.getMarketState(marketId)!;
+    expect(state.offers[0]?.isValid).toBe(true);
+    expect(state.offers[0]?.invalidReasons).not.toContain("Arrival is after the mandate deadline");
   });
 });

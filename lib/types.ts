@@ -75,3 +75,13 @@ export interface VoiceResponse {
   contentType: "text/xml";
   body: string;
 }
+
+/**
+ * App-visible inbound call state. The backend derives this from active call records;
+ * the frontend displays it without maintaining its own state machine.
+ *
+ * - idle:        no active inbound call
+ * - incoming:    the number is ringing (Twilio status: ringing)
+ * - in_progress: the call has been answered (Twilio status: in-progress)
+ */
+export type InboundCallState = "idle" | "incoming" | "in_progress";

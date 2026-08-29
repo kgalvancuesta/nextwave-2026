@@ -2,6 +2,17 @@ import { describe, expect, it } from "vitest";
 import { createTestContext } from "./helpers";
 
 describe("order lifecycle and commitment concurrency", () => {
+  it("rejects an order whose mandatory deadline precedes preferred arrival", () => {
+    const { repository, markets } = createTestContext();
+    const carrier = repository.createContact({ label: "Rivera", phoneInput: "+12025550100", e164PhoneNumber: "+12025550100" });
+    expect(() => markets.createOrder({
+      name: "Order 16", client: "Textiles", origin: "Manzanillo", destination: "Guadalajara", currency: "MXN",
+      targetPrice: 8_000, maximumPrice: 9_000, preferredArrival: "2030-01-10T18:00:00.000Z",
+      mustArriveBy: "2030-01-10T17:59:00.000Z", priceWeight: 0.7, speedWeight: 0.3,
+      minimumValidOffers: 1, desiredCarriers: 1, conditions: [], carrierIds: [carrier.id],
+    })).toThrow(/cannot be before preferred arrival/);
+  });
+
   it("preserves failure history and restores committed state through a recovery market", () => {
     const { repository, markets } = createTestContext();
     const carrier = repository.createContact({ label: "Rivera", phoneInput: "+12025550100", e164PhoneNumber: "+12025550100" });
