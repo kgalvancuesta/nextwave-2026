@@ -177,6 +177,12 @@ export class MarketlineRepository {
       WHERE calls.market_id = ? ORDER BY calls.created_at DESC`).all(marketId) as Row[]).map(toCall);
   }
 
+  listCallsForVoltaOperation(operationId: string): CallRecord[] {
+    return (this.db.prepare(`SELECT calls.*, contacts.id AS resolved_contact_id, contacts.label AS contact_label
+      FROM calls LEFT JOIN contacts ON contacts.e164_phone_number = calls.to_number
+      WHERE calls.volta_operation_id = ? ORDER BY calls.created_at DESC`).all(operationId) as Row[]).map(toCall);
+  }
+
   upsertInboundCall(input: {
     twilioCallSid: string;
     fromNumber: string;

@@ -25,7 +25,7 @@ export function NewOrderModal({ contacts, onClose, onCreated, onAddCarrier }: Pr
   const [draft, setDraft] = useState<NewOrderDraft>({
     name: "", client: "", origin: "", destination: "", reference: "", currency: "MXN",
     targetPrice: "", maximumPrice: "", preferredArrival: "", mustArriveBy: "",
-    minimumValidOffers: "2", desiredCarriers: "3",
+    minimumValidOffers: "2", desiredCarriers: "3", freeTimeEndsAt: "", currentEta: "", dailyDemurrageRate: "",
   });
   const formRef = useRef<HTMLFormElement>(null);
   const selectedContacts = useMemo(() => contacts.filter((contact) => selected.has(contact.id)), [contacts, selected]);
@@ -80,6 +80,9 @@ export function NewOrderModal({ contacts, onClose, onCreated, onAddCarrier }: Pr
           speedWeight: (100 - priority) / 100,
           minimumValidOffers: Number(draft.minimumValidOffers),
           desiredCarriers: Number(draft.desiredCarriers),
+          freeTimeEndsAt: draft.freeTimeEndsAt ? new Date(draft.freeTimeEndsAt).toISOString() : null,
+          currentEta: draft.currentEta ? new Date(draft.currentEta).toISOString() : null,
+          dailyDemurrageRate: draft.dailyDemurrageRate ? Number(draft.dailyDemurrageRate) : undefined,
           conditions: conditions.map((condition) => condition.trim()).filter(Boolean),
           carrierIds: selectedContacts.map((contact) => contact.id),
         }),
@@ -129,7 +132,16 @@ export function NewOrderModal({ contacts, onClose, onCreated, onAddCarrier }: Pr
           </section>
 
           <section className="border-t border-[var(--line)] pt-7">
-            <SectionTitle number="03" title="Conditions" description="Plain-language boundaries preserved in every market snapshot." />
+            <SectionTitle number="03" title="Demurrage watch" description="Optional, but required for Nauta to quantify and resolve a free-time risk." />
+            <div className="mt-4 grid gap-4 sm:grid-cols-3">
+              <Field label="Free time ends" error={visibleErrors.freeTimeEndsAt}><input data-field="freeTimeEndsAt" aria-invalid={Boolean(visibleErrors.freeTimeEndsAt)} type="datetime-local" className="field-input" value={draft.freeTimeEndsAt} onChange={(e) => update("freeTimeEndsAt", e.target.value)} /></Field>
+              <Field label="Current ETA"><input type="datetime-local" className="field-input" value={draft.currentEta} onChange={(e) => update("currentEta", e.target.value)} /></Field>
+              <Field label="Daily demurrage rate" error={visibleErrors.dailyDemurrageRate}><div className="relative"><span className="currency-prefix">$</span><input data-field="dailyDemurrageRate" aria-invalid={Boolean(visibleErrors.dailyDemurrageRate)} type="number" min="0" step="1" className="field-input currency-input" value={draft.dailyDemurrageRate} onChange={(e) => update("dailyDemurrageRate", e.target.value)} placeholder="18000" /></div></Field>
+            </div>
+          </section>
+
+          <section className="border-t border-[var(--line)] pt-7">
+            <SectionTitle number="04" title="Conditions" description="Plain-language boundaries preserved in every market snapshot." />
             <div className="mt-4 space-y-2">
               {conditions.map((condition, index) => <div key={index} className="flex gap-2"><input className="field-input" value={condition} onChange={(e) => setConditions((current) => current.map((item, itemIndex) => itemIndex === index ? e.target.value : item))} placeholder="Price must include tolls" /><button type="button" aria-label="Remove condition" className="icon-button" onClick={() => setConditions((current) => current.filter((_, itemIndex) => itemIndex !== index))}><Trash2 size={16} /></button></div>)}
               <button type="button" onClick={() => setConditions((current) => [...current, ""])} className="secondary-button"><Plus size={15} /> Add condition</button>
@@ -137,7 +149,7 @@ export function NewOrderModal({ contacts, onClose, onCreated, onAddCarrier }: Pr
           </section>
 
           <section className="border-t border-[var(--line)] pt-7">
-            <div className="flex items-start justify-between gap-4"><SectionTitle number="04" title="Select carriers" description="Choose up to three saved contacts for the initial market." /><button type="button" onClick={onAddCarrier} className="secondary-button"><Plus size={15} /> New carrier</button></div>
+            <div className="flex items-start justify-between gap-4"><SectionTitle number="05" title="Select carriers" description="Choose up to three saved contacts for the initial market." /><button type="button" onClick={onAddCarrier} className="secondary-button"><Plus size={15} /> New carrier</button></div>
             <div data-field="carrierIds" tabIndex={-1} className="mt-4 grid gap-2 sm:grid-cols-2">
               {contacts.map((contact) => { const checked = selected.has(contact.id); return <label key={contact.id} className={`flex cursor-pointer items-center gap-3 rounded-xl border p-3 ${checked ? "border-[var(--ink)] bg-[var(--paper)]" : "border-[var(--line)]"}`}><input type="checkbox" checked={checked} disabled={!checked && selected.size >= 3} onChange={() => toggleCarrier(contact.id)} className="h-5 w-5 accent-[var(--ink)]" /><span className="min-w-0"><span className="block truncate font-semibold">{contact.label}</span><span className="font-mono text-xs text-[var(--muted)]">{contact.e164PhoneNumber}</span></span></label>; })}
               {contacts.length === 0 && <button type="button" onClick={onAddCarrier} className="col-span-full rounded-xl border border-dashed border-[var(--line)] p-8 text-sm text-[var(--muted)]">Add a carrier before creating this order.</button>}

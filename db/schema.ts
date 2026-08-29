@@ -228,6 +228,24 @@ export const migrations = [
       "CREATE INDEX IF NOT EXISTS idx_volta_call_events_call_id ON volta_call_events(call_id, occurred_at)",
     ],
   },
+  {
+    id: "004_demurrage_risk",
+    statements: [
+      "ALTER TABLE orders ADD COLUMN free_time_ends_at TEXT",
+      "ALTER TABLE orders ADD COLUMN current_eta TEXT",
+      "ALTER TABLE orders ADD COLUMN daily_demurrage_rate INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE orders ADD COLUMN risk_status TEXT NOT NULL DEFAULT 'MONITORED' CHECK(risk_status IN ('MONITORED', 'AT_RISK', 'IN_PROGRESS', 'RESOLVED'))",
+      "CREATE INDEX idx_orders_risk_status ON orders(risk_status, updated_at DESC)",
+    ],
+  },
+  {
+    id: "005_order_volta_link",
+    statements: [
+      "ALTER TABLE orders ADD COLUMN volta_operation_id TEXT",
+      "ALTER TABLE orders ADD COLUMN volta_market_id TEXT",
+      "CREATE INDEX idx_orders_volta_operation_id ON orders(volta_operation_id)",
+    ],
+  },
 ] as const;
 
 export function applyMigrations(db: Database.Database): string[] {

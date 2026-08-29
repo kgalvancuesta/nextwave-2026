@@ -9,6 +9,7 @@ export const MARKET_STATUSES = ["DRAFT", "OPEN", "CALLING", "NEGOTIATING", "COMM
 export type MarketStatus = (typeof MARKET_STATUSES)[number];
 export type MarketCarrierStatus = "SELECTED" | "CALLING" | "CONNECTED" | "NEGOTIATING" | "FINAL" | "COMPLETED" | "FAILED";
 export type CommitmentStatus = "ACTIVE" | "INVALIDATED" | "FULFILLED";
+export type DemurrageRiskStatus = "MONITORED" | "AT_RISK" | "IN_PROGRESS" | "RESOLVED";
 
 export interface MandateSnapshot {
   targetPrice: number;
@@ -32,6 +33,12 @@ export interface OrderRecord extends MandateSnapshot {
   reference: string | null;
   lifecycleStatus: OrderStatus;
   exceptionReason: string | null;
+  freeTimeEndsAt: string | null;
+  currentEta: string | null;
+  dailyDemurrageRate: number;
+  riskStatus: DemurrageRiskStatus;
+  voltaOperationId: string | null;
+  voltaMarketId: string | null;
   carriers: Contact[];
   createdAt: string;
   updatedAt: string;
@@ -125,5 +132,6 @@ export interface OrderWorkspace {
   markets: MarketState[];
   commitments: CommitmentRecord[];
   events: OrderEventRecord[];
+  nautaCalls: CallRecord[];
   collapsedSummary: string;
 }

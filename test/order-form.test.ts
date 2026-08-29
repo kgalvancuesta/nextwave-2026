@@ -14,6 +14,9 @@ const draft: NewOrderDraft = {
   mustArriveBy: "2030-01-10T18:00",
   minimumValidOffers: "2",
   desiredCarriers: "3",
+  freeTimeEndsAt: "",
+  currentEta: "",
+  dailyDemurrageRate: "",
 };
 
 describe("new order arrival controls", () => {

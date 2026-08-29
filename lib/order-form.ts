@@ -11,6 +11,9 @@ export interface NewOrderDraft {
   mustArriveBy: string;
   minimumValidOffers: string;
   desiredCarriers: string;
+  freeTimeEndsAt: string;
+  currentEta: string;
+  dailyDemurrageRate: string;
 }
 
 export type NewOrderField = keyof NewOrderDraft | "carrierIds";
@@ -52,5 +55,9 @@ export function validateNewOrder(draft: NewOrderDraft, deadlineEnabled: boolean,
   const desiredCarriers = Number(draft.desiredCarriers);
   if (!Number.isInteger(desiredCarriers) || desiredCarriers < 1 || desiredCarriers > 3) errors.desiredCarriers = "Enter between 1 and 3 carriers.";
   if (selectedCarrierCount < 1) errors.carrierIds = "Select at least one carrier.";
+  if (draft.dailyDemurrageRate && (!Number.isInteger(Number(draft.dailyDemurrageRate)) || Number(draft.dailyDemurrageRate) < 0)) {
+    errors.dailyDemurrageRate = "Enter a non-negative whole daily rate.";
+  }
+  if (draft.dailyDemurrageRate && !draft.freeTimeEndsAt) errors.freeTimeEndsAt = "Set the free-time end to calculate risk.";
   return errors;
 }

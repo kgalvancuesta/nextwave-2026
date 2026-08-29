@@ -6,6 +6,7 @@ import { isActiveCallStatus } from "./call-status";
 import { getDatabase } from "./db";
 import type {
   CommitmentRecord,
+  DemurrageRiskStatus,
   MandateSnapshot,
   MarketCarrierState,
   MarketRecord,
@@ -38,6 +39,9 @@ export interface CreateOrderInput {
   desiredCarriers: number;
   conditions: string[];
   carrierIds: string[];
+  freeTimeEndsAt?: string | null;
+  currentEta?: string | null;
+  dailyDemurrageRate?: number;
 }
 
 export interface RecordOfferInput {
@@ -75,12 +79,13 @@ export class OrderMarketService {
       this.db.prepare(`INSERT INTO orders (
         id, name, client, origin, destination, reference, currency, target_price, maximum_price,
         preferred_arrival, must_arrive_by, price_weight, speed_weight, minimum_valid_offers,
-        desired_carriers, lifecycle_status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SOURCING', ?, ?)`).run(
+        desired_carriers, lifecycle_status, free_time_ends_at, current_eta, daily_demurrage_rate, risk_status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SOURCING', ?, ?, ?, ?, ?, ?)`).run(
         orderId, input.name.trim(), input.client.trim(), input.origin.trim(), input.destination.trim(),
         input.reference?.trim() || null, input.currency, input.targetPrice, input.maximumPrice,
         nullableDate(input.preferredArrival), nullableDate(input.mustArriveBy), input.priceWeight,
-        input.speedWeight, input.minimumValidOffers, input.desiredCarriers, now, now,
+        input.speedWeight, input.minimumValidOffers, input.desiredCarriers, nullableDate(input.freeTimeEndsAt), nullableDate(input.currentEta),
+        input.dailyDemurrageRate || 0, initialRiskStatus(input, now), now, now,
       );
       const conditionInsert = this.db.prepare(`INSERT INTO order_conditions
         (id, order_id, condition_text, position, created_at) VALUES (?, ?, ?, ?, ?)`);
@@ -121,11 +126,12 @@ export class OrderMarketService {
     const commitments = this.listCommitments(orderId);
     const events = (this.db.prepare("SELECT * FROM order_events WHERE order_id = ? ORDER BY created_at DESC LIMIT 100").all(orderId) as Row[])
       .map(toEvent);
+    const nautaCalls = order.voltaOperationId ? this.calls.listCallsForVoltaOperation(order.voltaOperationId) : [];
     const activeMarket = markets.find((market) => ["DRAFT", "OPEN", "CALLING", "NEGOTIATING", "COMMITTED"].includes(market.market.status));
     const currentMarket = ["COMPLETED", "ARCHIVED"].includes(order.lifecycleStatus)
       ? markets[0] || null
       : activeMarket || markets[0] || null;
-    return { order, currentMarket, markets, commitments, events, collapsedSummary: summarizeOrder(order, currentMarket, commitments) };
+    return { order, currentMarket, markets, commitments, events, nautaCalls, collapsedSummary: summarizeOrder(order, currentMarket, commitments) };
   }
 
   getMarket(marketId: string): MarketRecord | null {
@@ -334,6 +340,39 @@ export class OrderMarketService {
     return this.getOrder(orderId)!;
   }
 
+  beginNautaRiskRecovery(orderId: string): OrderWorkspace {
+    const workspace = this.getOrder(orderId);
+    if (!workspace) throw new Error("Order not found.");
+    const { order, currentMarket } = workspace;
+    if (!order.freeTimeEndsAt || order.dailyDemurrageRate <= 0) {
+      throw new Error("Add free-time end and a daily demurrage rate before starting Nauta.");
+    }
+    if (["COMPLETED", "ARCHIVED", "CANCELED"].includes(order.lifecycleStatus)) {
+      throw new Error("Nauta cannot start recovery for a closed order.");
+    }
+    const now = new Date().toISOString();
+    const detail = `Nauta recovery started: verify ETA, secure pickup appointment, then request a free-time extension or fee waiver if needed. Potential exposure ${formatMoney(order.dailyDemurrageRate, order.currency)} per day.`;
+    this.db.transaction(() => {
+      this.db.prepare(`UPDATE orders SET risk_status = 'IN_PROGRESS', lifecycle_status = CASE
+        WHEN lifecycle_status IN ('SOURCING', 'NEGOTIATING', 'EXCEPTION') THEN 'NEGOTIATING' ELSE lifecycle_status END,
+        updated_at = ? WHERE id = ?`).run(now, orderId);
+      this.insertEvent(orderId, currentMarket?.market.id || null, null, "NAUTA_RECOVERY_STARTED", detail, now);
+    })();
+    return this.getOrder(orderId)!;
+  }
+
+  linkVoltaRecovery(orderId: string, operationId: string, marketId: string): OrderWorkspace {
+    const order = this.getOrder(orderId)?.order;
+    if (!order) throw new Error("Order not found.");
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      this.db.prepare(`UPDATE orders SET volta_operation_id = ?, volta_market_id = ?, updated_at = ? WHERE id = ?`)
+        .run(operationId, marketId, now, orderId);
+      this.insertEvent(orderId, null, null, "NAUTA_MARKET_STARTED", "Nauta started parallel carrier calls under the order mandate.", now);
+    })();
+    return this.getOrder(orderId)!;
+  }
+
   private toOrder(row: Row): OrderRecord {
     const orderId = String(row.id);
     const conditions = (this.db.prepare("SELECT condition_text FROM order_conditions WHERE order_id = ? ORDER BY position").all(orderId) as Row[])
@@ -360,6 +399,12 @@ export class OrderMarketService {
       carriers,
       lifecycleStatus: String(row.lifecycle_status) as OrderStatus,
       exceptionReason: nullableString(row.exception_reason),
+      freeTimeEndsAt: nullableString(row.free_time_ends_at),
+      currentEta: nullableString(row.current_eta),
+      dailyDemurrageRate: Number(row.daily_demurrage_rate || 0),
+      riskStatus: String(row.risk_status || "MONITORED") as DemurrageRiskStatus,
+      voltaOperationId: nullableString(row.volta_operation_id),
+      voltaMarketId: nullableString(row.volta_market_id),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
     };
@@ -402,6 +447,14 @@ function validateOrderInput(input: CreateOrderInput) {
   if (input.carrierIds.length < 1 || input.carrierIds.length > 3 || new Set(input.carrierIds).size !== input.carrierIds.length) {
     throw new Error("Select between one and three unique carriers.");
   }
+  if (input.dailyDemurrageRate !== undefined && (!Number.isInteger(input.dailyDemurrageRate) || input.dailyDemurrageRate < 0)) {
+    throw new Error("Daily demurrage rate must be a non-negative whole amount.");
+  }
+}
+
+function initialRiskStatus(input: CreateOrderInput, now: string): DemurrageRiskStatus {
+  if (!input.freeTimeEndsAt || !input.dailyDemurrageRate) return "MONITORED";
+  return Date.parse(input.freeTimeEndsAt) - Date.parse(now) <= 48 * 60 * 60 * 1000 ? "AT_RISK" : "MONITORED";
 }
 
 function mandateFromInput(input: CreateOrderInput, conditions: string[]): MandateSnapshot {

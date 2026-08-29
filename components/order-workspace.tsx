@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowRight, Check, ChevronDown, ChevronUp, PhoneCall, Plus, RotateCcw, Trophy, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, ChevronDown, ChevronUp, PhoneCall, Plus, RotateCcw, Trophy, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { errorMessage, requestJson } from "@/lib/client-http";
 import type { MarketCarrierState, MarketState, OfferRecord, OrderWorkspace } from "@/lib/market-types";
@@ -57,6 +57,7 @@ export function OrderWorkspaceCard({ workspace, expanded, onToggle, onChanged }:
         {error && <div role="alert" className="mb-5 flex items-start justify-between rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900"><span>{error}</span><button onClick={() => setError(null)}><X size={16} /></button></div>}
         <div className="grid gap-7 xl:grid-cols-[.72fr_1.28fr]">
           <div className="space-y-7">
+            <DemurrageRiskPanel order={order} calls={workspace.nautaCalls} busy={busy} onResolve={() => void mutate(() => requestJson(`/api/orders/${order.id}/resolve-risk`, { method: "POST" }))} />
             <section><SectionHeader label="Mandate" /><div className="mt-3 grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--line)]"><Metric label="Target" value={money(order.targetPrice, order.currency)} /><Metric label="Maximum" value={money(order.maximumPrice, order.currency)} /><Metric label="Priority" value={priority.value} sub={priority.sub} /><Metric label="Offers required" value={String(order.minimumValidOffers)} sub={`${order.desiredCarriers} desired carriers`} /></div>{(order.preferredArrival || order.mustArriveBy) && <div className="mt-3 rounded-xl bg-[var(--paper)] px-4 py-3 text-sm"><div className="flex justify-between gap-4"><span className="text-[var(--muted)]">Preferred arrival</span><strong>{formatDate(order.preferredArrival)}</strong></div><div className="mt-1 flex justify-between gap-4"><span className="text-[var(--muted)]">Hard deadline</span><strong>{order.mustArriveBy ? formatDate(order.mustArriveBy) : "None"}</strong></div></div>}{order.conditions.length > 0 && <ul className="mt-3 space-y-1.5 text-sm text-[var(--muted)]">{order.conditions.map((condition) => <li key={condition} className="flex gap-2"><Check size={14} className="mt-0.5 shrink-0 text-[var(--signal-dark)]" />{condition}</li>)}</ul>}</section>
 
             {activeCommitment && <section><SectionHeader label="Commitment" /><div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50/70 p-4"><div className="flex items-start justify-between gap-3"><div><p className="font-semibold text-emerald-950">{activeCommitment.carrierLabel}</p><p className="mt-1 font-mono text-xs uppercase tracking-wider text-emerald-800">Active commitment</p></div><Trophy size={19} className="text-emerald-700" /></div><div className="mt-4 grid gap-2 sm:grid-cols-2"><button disabled={busy} onClick={() => void mutate(() => requestJson(`/api/orders/${order.id}/complete`, { method: "POST" }))} className="rounded-lg bg-emerald-800 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-900">Mark completed</button><button disabled={busy} onClick={invalidateCommitment} className="rounded-lg border border-red-200 bg-white px-3 py-2 text-sm font-semibold text-red-800 hover:bg-red-50">Mark carrier failed</button></div></div></section>}
@@ -76,6 +77,21 @@ export function OrderWorkspaceCard({ workspace, expanded, onToggle, onChanged }:
       {offerOpen && currentMarket && <OfferModal market={currentMarket} onClose={() => setOfferOpen(false)} onSaved={async () => { setOfferOpen(false); await onChanged(); }} />}
     </article>
   );
+}
+
+function DemurrageRiskPanel({ order, calls, busy, onResolve }: { order: OrderWorkspace["order"]; calls: OrderWorkspace["nautaCalls"]; busy: boolean; onResolve: () => void }) {
+  if (!order.freeTimeEndsAt || order.dailyDemurrageRate <= 0) return null;
+  const hoursRemaining = Math.round((Date.parse(order.freeTimeEndsAt) - Date.now()) / 3_600_000);
+  const etaOverrunDays = order.currentEta && Date.parse(order.currentEta) > Date.parse(order.freeTimeEndsAt)
+    ? Math.max(1, Math.ceil((Date.parse(order.currentEta) - Date.parse(order.freeTimeEndsAt)) / 86_400_000))
+    : 1;
+  const exposure = etaOverrunDays * order.dailyDemurrageRate;
+  const inProgress = order.riskStatus === "IN_PROGRESS";
+  return <section className={`rounded-2xl border p-5 ${inProgress ? "border-amber-300 bg-amber-50" : "border-red-300 bg-red-50"}`}>
+    <div className="flex items-start gap-3"><span className={`mt-0.5 rounded-full p-2 ${inProgress ? "bg-amber-200 text-amber-900" : "bg-red-200 text-red-900"}`}><AlertTriangle size={18} /></span><div className="min-w-0 flex-1"><p className="eyebrow">Nauta risk watch</p><h3 className="mt-1 text-lg font-semibold">{inProgress ? "Recovery in progress" : "Demurrage exposure"}</h3><p className="mt-1 text-sm text-[var(--muted)]">Free time ends {formatDate(order.freeTimeEndsAt)} · {hoursRemaining >= 0 ? `${hoursRemaining} hours remaining` : `${Math.abs(hoursRemaining)} hours overdue`}</p></div></div>
+    <div className="mt-4 grid grid-cols-2 gap-2"><Metric label="Potential exposure" value={money(exposure, order.currency)} sub={`${money(order.dailyDemurrageRate, order.currency)} / day`} /><Metric label="Current ETA" value={order.currentEta ? formatDate(order.currentEta, true) : "Unconfirmed"} /></div>
+    {inProgress ? <><p className="mt-4 text-sm font-medium text-amber-950">Nauta is verifying ETA, securing an appointment, and preparing an extension or fee-waiver fallback. The action is recorded in the order audit trail.</p>{calls.length > 0 && <div className="mt-4 space-y-2">{calls.map((call) => <div key={call.id} className="flex items-center justify-between rounded-lg border border-amber-200 bg-white/70 px-3 py-2 text-sm"><span className="font-semibold">{call.contactLabel || call.toNumber}</span><span className="font-mono text-[10px] uppercase tracking-wider">{displayStatus(call.status)}</span></div>)}</div>}</> : <button disabled={busy} onClick={onResolve} className="signal-button mt-4 w-full"><PhoneCall size={17} /> Nauta: call 3 carriers now</button>}
+  </section>;
 }
 
 function MarketPanel({ market, busy, onStart, onAddOffer, onCommit }: { market: MarketState; busy: boolean; onStart: () => void; onAddOffer: () => void; onCommit: (offer: OfferRecord) => void }) {
