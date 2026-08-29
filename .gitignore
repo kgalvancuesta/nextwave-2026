@@ -4,6 +4,7 @@ out/
 dist/
 .env
 .env.local
+/apikey.md
 secrets/
 *.credentials.md
 *.sqlite
