@@ -18,6 +18,7 @@ export function validateTwilioWebhook(
   config: TelephonyConfig,
 ): boolean {
   if (!config.validateSignatures) return true;
+  if (!config.authToken) return false;
   const signature = request.headers.get("x-twilio-signature");
   if (!signature) return false;
   const requested = new URL(request.url);

@@ -17,7 +17,9 @@ export class TwilioTelephonyProvider implements TelephonyProvider {
   private readonly client: ReturnType<typeof twilio>;
 
   constructor(private readonly config: TelephonyConfig) {
-    this.client = twilio(config.accountSid, config.authToken);
+    this.client = config.apiKeySid && config.apiKeySecret
+      ? twilio(config.apiKeySid, config.apiKeySecret, { accountSid: config.accountSid })
+      : twilio(config.accountSid, config.authToken!);
   }
 
   async createCall(input: CreateCallInput): Promise<{ callSid: string }> {

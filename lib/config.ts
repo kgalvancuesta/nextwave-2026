@@ -6,7 +6,9 @@ import { z } from "zod";
 
 export interface TwilioCredentials {
   accountSid: string;
-  authToken: string;
+  authToken: string | null;
+  apiKeySid: string | null;
+  apiKeySecret: string | null;
   phoneNumber: string;
 }
 
@@ -23,33 +25,40 @@ export function getDatabasePath(): string {
 }
 
 export function loadTelephonyConfig(): TelephonyConfig {
-  const hasEnvironmentCredentials = Boolean(
-    process.env.TWILIO_ACCOUNT_SID?.trim() &&
-    process.env.TWILIO_AUTH_TOKEN?.trim() &&
-    process.env.TWILIO_PHONE_NUMBER?.trim(),
-  );
-  const fileCredentials = !hasEnvironmentCredentials && process.env.TWILIO_CREDENTIALS_FILE
+  const fileCredentials = process.env.TWILIO_CREDENTIALS_FILE
     ? readCredentialsMarkdown(process.env.TWILIO_CREDENTIALS_FILE)
     : {};
   const credentials = {
     accountSid: process.env.TWILIO_ACCOUNT_SID?.trim() || fileCredentials.TWILIO_ACCOUNT_SID,
     authToken: process.env.TWILIO_AUTH_TOKEN?.trim() || fileCredentials.TWILIO_AUTH_TOKEN,
+    apiKeySid: process.env.TWILIO_API_KEY_SID?.trim() || fileCredentials.TWILIO_API_KEY_SID,
+    apiKeySecret: process.env.TWILIO_API_KEY_SECRET?.trim() || fileCredentials.TWILIO_API_KEY_SECRET,
     phoneNumber: process.env.TWILIO_PHONE_NUMBER?.trim() || fileCredentials.TWILIO_PHONE_NUMBER,
   };
-  const missing = Object.entries(credentials).filter(([, value]) => !value).map(([key]) => key);
+  const missing = (["accountSid", "phoneNumber"] as const).filter((key) => !credentials[key]);
   if (missing.length > 0) {
     throw new Error(`Missing Twilio credentials: ${missing.join(", ")}. Set environment variables or TWILIO_CREDENTIALS_FILE.`);
+  }
+  const hasAuthToken = Boolean(credentials.authToken);
+  const hasApiKey = Boolean(credentials.apiKeySid && credentials.apiKeySecret);
+  if (!hasAuthToken && !hasApiKey) {
+    throw new Error("Twilio REST authentication requires TWILIO_AUTH_TOKEN or both TWILIO_API_KEY_SID and TWILIO_API_KEY_SECRET.");
   }
 
   const publicBaseUrl = parsePublicBaseUrl(process.env.PUBLIC_BASE_URL);
   const validateSignatures = envBoolean.parse(process.env.TWILIO_VALIDATE_SIGNATURES?.trim().toLowerCase() || "true");
+  if (validateSignatures && !hasAuthToken) {
+    throw new Error("Twilio webhook signature validation requires TWILIO_AUTH_TOKEN; an API key cannot validate webhook signatures.");
+  }
   if (process.env.NODE_ENV === "production" && !validateSignatures) {
     throw new Error("TWILIO_VALIDATE_SIGNATURES=false is forbidden in production.");
   }
 
   return {
     accountSid: credentials.accountSid!,
-    authToken: credentials.authToken!,
+    authToken: credentials.authToken || null,
+    apiKeySid: credentials.apiKeySid || null,
+    apiKeySecret: credentials.apiKeySecret || null,
     phoneNumber: credentials.phoneNumber!,
     publicBaseUrl,
     validateSignatures,
@@ -67,10 +76,12 @@ function parsePublicBaseUrl(input: string | undefined): string {
   return url.toString().replace(/\/$/, "");
 }
 
-function readCredentialsMarkdown(path: string): Partial<Record<"TWILIO_ACCOUNT_SID" | "TWILIO_AUTH_TOKEN" | "TWILIO_PHONE_NUMBER", string>> {
+type CredentialKey = "TWILIO_ACCOUNT_SID" | "TWILIO_AUTH_TOKEN" | "TWILIO_API_KEY_SID" | "TWILIO_API_KEY_SECRET" | "TWILIO_PHONE_NUMBER";
+
+function readCredentialsMarkdown(path: string): Partial<Record<CredentialKey, string>> {
   const content = readFileSync(resolve(path), "utf8");
-  const result: Partial<Record<"TWILIO_ACCOUNT_SID" | "TWILIO_AUTH_TOKEN" | "TWILIO_PHONE_NUMBER", string>> = {};
-  for (const key of ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER"] as const) {
+  const result: Partial<Record<CredentialKey, string>> = {};
+  for (const key of ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_API_KEY_SID", "TWILIO_API_KEY_SECRET", "TWILIO_PHONE_NUMBER"] as const) {
     const match = content.match(new RegExp(`^\\s*(?:[-*]\\s*)?${key}\\s*[:=]\\s*(?:\\x60)?([^\\x60\\r\\n]+)(?:\\x60)?\\s*$`, "m"));
     if (match?.[1]) result[key] = match[1].trim();
   }

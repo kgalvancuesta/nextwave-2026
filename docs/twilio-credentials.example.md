@@ -6,4 +6,8 @@ TWILIO_ACCOUNT_SID: `ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`
 
 TWILIO_AUTH_TOKEN: `replace-me`
 
+TWILIO_API_KEY_SID: `SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`
+
+TWILIO_API_KEY_SECRET: `replace-me`
+
 TWILIO_PHONE_NUMBER: `+12025550131`

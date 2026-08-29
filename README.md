@@ -33,7 +33,7 @@ cp docs/twilio-credentials.example.md secrets/twilio.md
 npm run db:migrate
 ```
 
-Put the real Twilio values in `secrets/twilio.md` using the exact documented key names. `secrets/` is gitignored. Environment variables `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_PHONE_NUMBER` remain supported and override the file.
+Put the real Twilio values in `secrets/twilio.md` using the exact documented key names. `secrets/` is gitignored. Environment variables remain supported and override the file. REST calls can authenticate with either `TWILIO_AUTH_TOKEN` or the `TWILIO_API_KEY_SID` / `TWILIO_API_KEY_SECRET` pair. Twilio webhook signature validation still requires `TWILIO_AUTH_TOKEN`; API keys cannot validate webhook signatures.
 
 Start the app:
 
