@@ -11,7 +11,8 @@
     "lint": "eslint .",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "db:migrate": "tsx scripts/migrate.ts"
+    "db:migrate": "tsx scripts/migrate.ts",
+    "twilio:configure": "tsx scripts/twilio-configure.ts"
   },
   "dependencies": {
     "better-sqlite3": "13.0.3",
