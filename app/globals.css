@@ -6,6 +6,7 @@
   --paper: #f5f6f1;
   --surface: #ffffff;
   --line: #d9ded8;
+  --line-strong: #aab4af;
   --signal: #d9ff5b;
   --signal-dark: #253b2d;
   --warning: #f0b95c;
@@ -29,11 +30,11 @@ body {
   font-family: var(--font-geist), Arial, sans-serif;
 }
 
-button, input, textarea { font: inherit; }
+button, input, textarea, select { font: inherit; }
 
 button { cursor: pointer; }
 
-button:focus-visible, input:focus-visible, textarea:focus-visible {
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
   outline: 2px solid var(--signal-dark);
   outline-offset: 2px;
 }
@@ -48,5 +49,60 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 }
 
 .field-input::placeholder { color: #8b9591; }
+
+.eyebrow {
+  font-family: var(--font-geist-mono);
+  font-size: 0.68rem;
+  line-height: 1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--muted);
+}
+
+.primary-button, .secondary-button, .signal-button, .icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  font-weight: 650;
+  transition: background-color 150ms ease, color 150ms ease, opacity 150ms ease;
+}
+
+.primary-button { border-radius: 0.7rem; background: var(--ink); color: white; padding: 0.66rem 1rem; font-size: 0.875rem; }
+.secondary-button { border: 1px solid var(--line); border-radius: 0.7rem; background: white; color: var(--ink); padding: 0.58rem 0.85rem; font-size: 0.82rem; }
+.signal-button { border: 1px solid rgba(19,35,31,.2); border-radius: 0.7rem; background: var(--signal); color: var(--ink); padding: 0.66rem 1rem; font-size: 0.875rem; }
+.icon-button { border-radius: 0.55rem; padding: 0.5rem; color: var(--muted); }
+.primary-button:hover, .signal-button:hover { filter: brightness(.95); }
+.secondary-button:hover, .icon-button:hover { background: var(--paper); color: var(--ink); }
+.primary-button:disabled, .secondary-button:disabled, .signal-button:disabled { cursor: not-allowed; opacity: .42; }
+
+.surface-panel { border: 1px solid var(--line); border-radius: 1rem; background: white; padding: 1.25rem; box-shadow: 0 10px 40px rgba(19,35,31,.04); }
+.order-card { overflow: hidden; border: 1px solid var(--line); border-left-width: 4px; border-radius: 1rem; background: rgba(255,255,255,.96); box-shadow: 0 8px 28px rgba(19,35,31,.035); }
+.order-tone-yellow { border-left-color: #d69b21; }
+.order-tone-green { border-left-color: #3d8b64; }
+.order-tone-red { border-left-color: #c54f49; }
+.order-tone-gray { border-left-color: #8b9591; }
+.status-dot-yellow { background: #d69b21; }
+.status-dot-green { background: #3d8b64; }
+.status-dot-red { background: #c54f49; }
+.status-dot-gray { background: #8b9591; }
+.status-pill { border-radius: 999px; padding: .35rem .68rem; font-family: var(--font-geist-mono); font-size: .64rem; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+.status-pill-yellow { background: #fff4cf; color: #765314; }
+.status-pill-green { background: #dcf4e7; color: #225b40; }
+.status-pill-red { background: #fde6e3; color: #8c332e; }
+.status-pill-gray { background: #e9ecea; color: #59635f; }
+.rank-chip { display: inline-flex; height: 1.55rem; min-width: 1.55rem; align-items: center; justify-content: center; border-radius: 999px; background: var(--ink); color: white; font-family: var(--font-geist-mono); font-size: .65rem; }
+
+.market-table { width: 100%; min-width: 700px; border-collapse: collapse; text-align: left; font-size: .82rem; }
+.market-table th { border-bottom: 1px solid var(--line); padding: 0 0.75rem .65rem 0; color: var(--muted); font-family: var(--font-geist-mono); font-size: .62rem; font-weight: 500; text-transform: uppercase; letter-spacing: .1em; }
+.market-table td { border-bottom: 1px solid var(--line); padding: .8rem .75rem .8rem 0; }
+.market-table tr:last-child td { border-bottom: 0; }
+.market-table .best-row td { background: rgba(255, 244, 207, .34); }
+.market-table .best-row td:first-child { padding-left: .65rem; }
+
+@media (max-width: 640px) {
+  .surface-panel { padding: 1rem; }
+  .status-pill { max-width: 12rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
 
 ::selection { background: var(--signal); color: var(--ink); }

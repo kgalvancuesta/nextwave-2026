@@ -34,6 +34,9 @@ export interface CallRecord {
   batchId: string | null;
   contactId: string | null;
   contactLabel: string | null;
+  orderId: string | null;
+  marketId: string | null;
+  carrierId: string | null;
   direction: CallDirection;
   fromNumber: string;
   toNumber: string;

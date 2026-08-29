@@ -58,7 +58,11 @@ export class MarketlineRepository {
     return this.db.prepare("DELETE FROM contacts WHERE id = ?").run(id).changes > 0;
   }
 
-  createOutboundBatch(contacts: Contact[], fromNumber: string): { batchId: string; calls: CallRecord[] } {
+  createOutboundBatch(
+    contacts: Contact[],
+    fromNumber: string,
+    context?: { orderId: string; marketId: string },
+  ): { batchId: string; calls: CallRecord[] } {
     const batchId = randomUUID();
     const now = new Date().toISOString();
     const calls = contacts.map((contact): CallRecord => ({
@@ -67,6 +71,9 @@ export class MarketlineRepository {
       batchId,
       contactId: contact.id,
       contactLabel: contact.label,
+      orderId: context?.orderId || null,
+      marketId: context?.marketId || null,
+      carrierId: context ? contact.id : null,
       direction: "OUTBOUND",
       fromNumber,
       toNumber: contact.e164PhoneNumber,
@@ -84,13 +91,14 @@ export class MarketlineRepository {
     this.db.transaction(() => {
       this.db.prepare("INSERT INTO call_batches (id, created_at) VALUES (?, ?)").run(batchId, now);
       const insert = this.db.prepare(`INSERT INTO calls (
-        id, twilio_call_sid, batch_id, contact_id, direction, from_number, to_number,
+        id, twilio_call_sid, batch_id, contact_id, order_id, market_id, carrier_id, direction, from_number, to_number,
         status, status_rank, started_at, answered_at, completed_at, duration_seconds,
         error_code, error_message, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       for (const call of calls) {
         insert.run(
-          call.id, null, batchId, call.contactId, call.direction, call.fromNumber, call.toNumber,
+          call.id, null, batchId, call.contactId, call.orderId, call.marketId, call.carrierId,
+          call.direction, call.fromNumber, call.toNumber,
           call.status, 0, call.startedAt, null, null, null, null, null, call.createdAt, call.updatedAt,
         );
       }
@@ -104,6 +112,7 @@ export class MarketlineRepository {
       status = CASE WHEN status_rank < 1 THEN 'INITIATED' ELSE status END,
       status_rank = CASE WHEN status_rank < 1 THEN 1 ELSE status_rank END,
       updated_at = ? WHERE id = ?`).run(twilioCallSid, now, callId);
+    this.synchronizeMarketCallState(callId, "INITIATED", "REQUESTED");
     return this.getCall(callId)!;
   }
 
@@ -125,6 +134,7 @@ export class MarketlineRepository {
     this.db.prepare(`UPDATE calls SET status = 'FAILED', status_rank = 4, completed_at = ?,
       error_code = ?, error_message = ?, updated_at = ? WHERE id = ?`)
       .run(now, errorCode, errorMessage, now, callId);
+    this.synchronizeMarketCallState(callId, "FAILED", "REQUESTED");
     return this.getCall(callId)!;
   }
 
@@ -145,6 +155,12 @@ export class MarketlineRepository {
     return (this.db.prepare(`SELECT calls.*, contacts.label AS contact_label
       FROM calls LEFT JOIN contacts ON contacts.id = calls.contact_id
       ORDER BY calls.created_at DESC LIMIT ?`).all(limit) as Row[]).map(toCall);
+  }
+
+  listCallsForMarket(marketId: string): CallRecord[] {
+    return (this.db.prepare(`SELECT calls.*, contacts.label AS contact_label
+      FROM calls LEFT JOIN contacts ON contacts.id = calls.contact_id
+      WHERE calls.market_id = ? ORDER BY calls.created_at DESC`).all(marketId) as Row[]).map(toCall);
   }
 
   upsertInboundCall(input: {
@@ -195,6 +211,7 @@ export class MarketlineRepository {
         details.durationSeconds ?? null, details.errorCode ?? null, details.errorMessage ?? null,
         JSON.stringify(rawPayload), now, twilioCallSid,
       );
+    this.synchronizeMarketCallState(existing.id, nextStatus, existing.status);
     return this.getCallByTwilioSid(twilioCallSid)!;
   }
 
@@ -227,6 +244,32 @@ export class MarketlineRepository {
       .get(input.twilioRecordingSid) as Row;
     return toRecording(row);
   }
+
+  private synchronizeMarketCallState(callId: string, status: CallStatus, previousStatus: CallStatus) {
+    const row = this.db.prepare("SELECT order_id, market_id, carrier_id FROM calls WHERE id = ?").get(callId) as Row | undefined;
+    const marketId = nullableString(row?.market_id);
+    const orderId = nullableString(row?.order_id);
+    const carrierId = nullableString(row?.carrier_id);
+    if (!marketId || !orderId || !carrierId) return;
+    const now = new Date().toISOString();
+    const carrierStatus = status === "IN_PROGRESS" ? "CONNECTED"
+      : ["FAILED", "BUSY", "NO_ANSWER", "CANCELED"].includes(status) ? "FAILED"
+        : isTerminalCallStatus(status) ? "COMPLETED" : "CALLING";
+    this.db.prepare("UPDATE market_carriers SET status = ?, updated_at = ? WHERE market_id = ? AND carrier_id = ?")
+      .run(carrierStatus, now, marketId, carrierId);
+    if (status === "IN_PROGRESS" && previousStatus !== "IN_PROGRESS") {
+      this.db.prepare(`INSERT INTO order_events (id, order_id, market_id, call_id, event_type, detail, created_at)
+        VALUES (?, ?, ?, ?, 'CALL_ANSWERED', 'Carrier answered', ?)`).run(randomUUID(), orderId, marketId, callId, now);
+    }
+    const active = Number((this.db.prepare(`SELECT COUNT(*) AS count FROM calls WHERE market_id = ?
+      AND status IN ('REQUESTED', 'INITIATED', 'RINGING', 'IN_PROGRESS')`).get(marketId) as Row).count);
+    const total = Number((this.db.prepare("SELECT COUNT(*) AS count FROM calls WHERE market_id = ?").get(marketId) as Row).count);
+    if (total > 0 && active === 0) {
+      this.db.prepare("UPDATE markets SET status = CASE WHEN status = 'CALLING' THEN 'OPEN' ELSE status END, updated_at = ? WHERE id = ?")
+        .run(now, marketId);
+    }
+    this.db.prepare("UPDATE orders SET updated_at = ? WHERE id = ?").run(now, orderId);
+  }
 }
 
 let repository: MarketlineRepository | undefined;
@@ -248,6 +291,7 @@ function toCall(row: Row): CallRecord {
   return {
     id: String(row.id), twilioCallSid: nullableString(row.twilio_call_sid), batchId: nullableString(row.batch_id),
     contactId: nullableString(row.contact_id), contactLabel: nullableString(row.contact_label),
+    orderId: nullableString(row.order_id), marketId: nullableString(row.market_id), carrierId: nullableString(row.carrier_id),
     direction: row.direction as CallRecord["direction"], fromNumber: String(row.from_number),
     toNumber: String(row.to_number), status: row.status as CallStatus, startedAt: String(row.started_at),
     answeredAt: nullableString(row.answered_at), completedAt: nullableString(row.completed_at),

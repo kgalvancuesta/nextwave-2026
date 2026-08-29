@@ -9,6 +9,7 @@ export async function initiateOutboundBatch(input: {
   fromNumber: string;
   repository: MarketlineRepository;
   provider: TelephonyProvider;
+  context?: { orderId: string; marketId: string };
 }): Promise<{ batchId: string; calls: CallRecord[] }> {
   const uniqueIds = [...new Set(input.contactIds)];
   if (uniqueIds.length < 1 || uniqueIds.length > 3 || uniqueIds.length !== input.contactIds.length) {
@@ -17,7 +18,7 @@ export async function initiateOutboundBatch(input: {
   const contacts = input.repository.getContacts(uniqueIds);
   if (contacts.length !== uniqueIds.length) throw new Error("One or more selected contacts no longer exist.");
 
-  const batch = input.repository.createOutboundBatch(contacts, input.fromNumber);
+  const batch = input.repository.createOutboundBatch(contacts, input.fromNumber, input.context);
   await Promise.allSettled(batch.calls.map(async (call) => {
     try {
       const result = await input.provider.createCall({ to: call.toNumber, internalCallId: call.id });

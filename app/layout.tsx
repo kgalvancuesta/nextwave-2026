@@ -3,17 +3,17 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.PUBLIC_BASE_URL || "http://localhost:3000"),
-  title: "Marketline | Telephony Control",
-  description: "Carrier phonebook and live PSTN call control for Marketline.",
+  title: "Marketline | Order + Market State",
+  description: "Authoritative order, carrier market, offer, commitment, and live-call operations for ground transport procurement.",
   openGraph: {
     title: "Marketline",
-    description: "Carrier market telephony control",
+    description: "Order, market, offer, commitment, and live-call operations",
     images: [{ url: "/og.png", width: 1672, height: 941, alt: "Marketline carrier market telephony control" }],
   },
   twitter: {
     card: "summary_large_image",
     title: "Marketline",
-    description: "Carrier market telephony control",
+    description: "Order, market, offer, commitment, and live-call operations",
     images: ["/og.png"],
   },
 };

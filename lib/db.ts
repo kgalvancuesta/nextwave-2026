@@ -3,6 +3,7 @@ import "server-only";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
+import { applyMigrations } from "@/db/schema";
 import { getDatabasePath } from "./config";
 
 let database: Database.Database | undefined;
@@ -14,5 +15,6 @@ export function getDatabase(): Database.Database {
   database = new Database(path);
   database.pragma("journal_mode = WAL");
   database.pragma("foreign_keys = ON");
+  applyMigrations(database);
   return database;
 }

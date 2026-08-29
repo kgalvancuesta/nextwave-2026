@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { initiateOutboundBatch } from "@/lib/call-service";
+import { handleStatusCallback, initiateOutboundBatch } from "@/lib/call-service";
 import type { CreateCallInput, TelephonyProvider } from "@/lib/telephony";
-import { createTestRepository } from "./helpers";
+import { createTestContext, createTestRepository } from "./helpers";
 
 describe("three-call batches", () => {
   it("requests all calls concurrently and isolates one failure", async () => {
@@ -37,5 +37,42 @@ describe("three-call batches", () => {
     expect(result.calls.filter((call) => call.status === "INITIATED")).toHaveLength(2);
     expect(result.calls.filter((call) => call.status === "FAILED")).toHaveLength(1);
     expect(result.calls.find((call) => call.status === "FAILED")?.errorCode).toBe("21608");
+  });
+
+  it("associates market calls with their order, market, and carrier", async () => {
+    const { repository, markets } = createTestContext();
+    const contact = repository.createContact({ label: "Rivera", phoneInput: "+12025550100", e164PhoneNumber: "+12025550100" });
+    const workspace = markets.createOrder({
+      name: "Order 17", client: "Textiles", origin: "Manzanillo", destination: "Guadalajara", currency: "MXN",
+      targetPrice: 8_000, maximumPrice: 9_000, priceWeight: 0.7, speedWeight: 0.3,
+      minimumValidOffers: 1, desiredCarriers: 1, conditions: [], carrierIds: [contact.id],
+    });
+    const marketId = workspace.currentMarket!.market.id;
+    markets.startMarket(marketId);
+    const provider: TelephonyProvider = {
+      async createCall() { return { callSid: "CA_market_1" }; },
+      async startRecording() { return { recordingSid: "RE_unused" }; },
+    };
+
+    const result = await initiateOutboundBatch({
+      contactIds: [contact.id],
+      fromNumber: "+12025550101",
+      repository,
+      provider,
+      context: { orderId: workspace.order.id, marketId },
+    });
+
+    expect(result.calls[0]).toMatchObject({
+      orderId: workspace.order.id,
+      marketId,
+      carrierId: contact.id,
+      contactId: contact.id,
+    });
+    expect(markets.getMarketState(marketId)?.progress.callsStarted).toBe(1);
+    handleStatusCallback({ params: { CallSid: "CA_market_1", CallStatus: "in-progress" }, repository });
+    handleStatusCallback({ params: { CallSid: "CA_market_1", CallStatus: "completed", CallDuration: "10" }, repository });
+    const completedWorkspace = markets.getOrder(workspace.order.id)!;
+    expect(completedWorkspace.currentMarket?.market.status).toBe("OPEN");
+    expect(completedWorkspace.events.some((event) => event.eventType === "CALL_ANSWERED")).toBe(true);
   });
 });

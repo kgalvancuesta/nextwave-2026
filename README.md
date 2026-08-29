@@ -1,25 +1,23 @@
-# Marketline telephony milestone
+# Marketline order + market state
 
-Marketline is a small Next.js dashboard for proving the PSTN substrate of a future carrier-market voice agent. It stores an editable carrier phonebook, starts up to three real Twilio calls concurrently, receives inbound Twilio calls, polls live status, and preserves call/recording history in SQLite.
+Marketline is an operational Next.js dashboard for ground-transport procurement. It manages persistent orders, mandate snapshots, carrier markets, historical offers, commitments, recovery markets, and the existing Twilio phone system in one authoritative SQLite state.
 
-There is no AI, speech recognition, negotiation, mandate, commitment, or OpenAI integration in this milestone. Answered calls play an explicit placeholder TwiML message.
+There is no AI, speech recognition, or autonomous negotiation in this milestone. Offers and commitments are entered manually. Answered calls still play an explicit placeholder TwiML message until a future voice adapter replaces it.
 
 ## Architecture
 
 ```text
-Dashboard -> Next.js route handlers -> Call service -> TelephonyProvider
-                                      |                 |
-                                      |                 +-- TwilioTelephonyProvider
-                                      |
-                                      +-- SQLite repository
+Human dashboard ─┐
+Future agents ───┼─> OrderMarketService ─> normalized SQLite state
+                 │        │
+Twilio webhooks ─┘        └─> derived market state and deterministic offer scoring
 
-Twilio webhooks -> signature validation -> call persistence
-                                      |
-                                      +-- VoiceSessionAdapter
-                                             +-- PlaceholderVoiceSessionAdapter
+Market call action -> existing Call service -> TwilioTelephonyProvider -> PSTN
 ```
 
-The future realtime agent belongs in a new `VoiceSessionAdapter` implementation. Contact storage, batch creation, Twilio status handling, call history, and the dashboard do not need to change.
+Orders and markets are separate records. Every market preserves its mandate snapshot, and every offer is immutable; a newer carrier offer links to the offer it supersedes. Calls link to order, market, and carrier. A partial unique index prevents two active commitments for the same market. The dashboard and future agents consume the same derived `getMarketState` result.
+
+The future realtime agent belongs in a new `VoiceSessionAdapter` implementation and can use `getOrder`, `getMarketState`, and `recordOffer` without sharing LLM conversation state between carrier calls.
 
 ## 1. Install and initialize
 
@@ -93,17 +91,19 @@ Twilio signatures are validated against `PUBLIC_BASE_URL` by default. A rejected
 - Confirm the account has funds and the selected Twilio number has Voice capability.
 - Regulations and geographic permissions can make a valid E.164 number uncallable. Marketline reports the Twilio error separately from phone-number validation.
 
-## 5. First live test
+## 5. Order and market test
 
-1. Add three contacts in Marketline. Mexican national-format numbers use `MX` as the default region; international numbers should include `+` and country code.
-2. Edit any saved entry to verify the normalized E.164 number updates persistently.
-3. Select three contacts and press **Call selected (3)**.
-4. Verify three independent Twilio Call SIDs are created and each card changes through initiated, ringing, and in progress independently.
-5. Answer a call and confirm the placeholder says the voice agent is not connected.
-6. Call the Twilio number from a real phone. Confirm the inbound placeholder and the inbound record in Marketline.
-7. Hang up and confirm the call moves from Active Calls to Recent Calls.
+1. Add up to three carriers. Mexican national-format numbers use `MX` as the default region; international numbers should include `+` and country code.
+2. Create an order with its target, maximum, timing mandate, priority weights, conditions, and selected carriers.
+3. Expand the order and press **Call carriers**. Verify the call records appear inside the market and in global call activity.
+4. Add at least the configured minimum number of valid offers. Add a later offer from the same carrier and confirm the earlier offer remains in history.
+5. Commit a valid offer. Confirm the order turns green and only one active commitment exists.
+6. Mark the carrier failed, create a recovery market, add replacement offers, and recommit. The failed market and commitment remain visible.
+7. Mark the transport completed. Confirm the order becomes gray and remains available under the Past filter.
 
 The three Twilio REST requests use `Promise.allSettled`; one rejected destination does not stop the others.
+
+The carrier directory also retains **Quick call** for direct telephony testing outside an order.
 
 ## Recording groundwork
 
