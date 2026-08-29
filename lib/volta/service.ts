@@ -2,6 +2,7 @@ import "server-only";
 
 import { loadTelephonyConfig, loadVoltaConfig } from "@/lib/config";
 import { TwilioTelephonyProvider } from "@/lib/telephony";
+import { DashboardProcurementVoiceAdapter } from "@/lib/procurement-voice";
 import { TelephonyDialGateway, TwilioSmsRecapGateway } from "./gateways";
 import { OpenAiAgentsRuntime } from "./openai-agents-runtime";
 import { getVoltaStore } from "./store";
@@ -34,6 +35,7 @@ export function getVoiceControlService(): VoiceControlService {
       sipUri: volta.sipUri,
       humanEscalationUri: volta.humanEscalationUri ?? undefined,
     },
+    new DashboardProcurementVoiceAdapter(),
   );
   return service;
 }

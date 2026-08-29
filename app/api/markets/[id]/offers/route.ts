@@ -16,6 +16,8 @@ const offerSchema = z.object({
   isFinalOffer: z.boolean().optional(),
   requiresImmediateDecision: z.boolean().optional(),
   callbackAllowed: z.boolean().optional(),
+  confirmedRequirements: z.array(z.string()).optional(),
+  rejectedRequirements: z.array(z.string()).optional(),
 });
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {

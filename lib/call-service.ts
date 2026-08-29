@@ -92,6 +92,17 @@ export function handleStatusCallback(input: {
 }): CallRecord {
   const callSid = required(input.params, "CallSid");
   const status = mapTwilioCallStatus(required(input.params, "CallStatus"));
+  if (!input.repository.getCallByTwilioSid(callSid) && isInboundStatusPayload(input.params)) {
+    const contact = resolveContactByPhoneNumber(input.repository, input.params.From);
+    input.repository.upsertInboundCall({
+      twilioCallSid: callSid,
+      fromNumber: input.params.From,
+      toNumber: input.params.To,
+      contactId: contact?.id ?? null,
+      status,
+      rawPayload: input.params,
+    });
+  }
   const duration = integerOrNull(input.params.CallDuration);
   const errorCode = input.params.ErrorCode || null;
   const errorMessage = input.params.ErrorMessage || (errorCode ? `Twilio error ${errorCode}` : null);
@@ -100,6 +111,12 @@ export function handleStatusCallback(input: {
     errorCode,
     errorMessage,
   });
+}
+
+function isInboundStatusPayload(params: Record<string, string>): params is Record<string, string> & { From: string; To: string } {
+  return params.Direction?.toLowerCase().startsWith("inbound") === true
+    && Boolean(params.From?.trim())
+    && Boolean(params.To?.trim());
 }
 
 export function handleRecordingCallback(input: {

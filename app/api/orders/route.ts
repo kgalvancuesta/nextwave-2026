@@ -36,7 +36,9 @@ const orderSchema = z.object({
 
 export async function GET() {
   try {
-    return Response.json({ orders: getOrderMarketService().listOrders() });
+    const service = getOrderMarketService();
+    service.reevaluateExpiredMarkets();
+    return Response.json({ orders: service.listOrders() });
   } catch (error) {
     return apiError(error);
   }

@@ -2,15 +2,15 @@
 
 Marketline is an operational Next.js dashboard for ground-transport procurement. It manages persistent orders, mandate snapshots, carrier markets, historical offers, commitments, recovery markets, and the existing Twilio phone system in one authoritative SQLite state.
 
-On top of that substrate runs the Volta voice layer: an OpenAI Realtime agent that phones carriers, records what they offer, and is bounded by deterministic policy rather than by its prompt. It keeps its own negotiation state in `volta_*` tables and does not write to the order/market records the dashboard owns. Without `OPENAI_API_KEY` the telephony harness runs exactly as before and answered calls play the placeholder TwiML message.
+On top of that substrate runs the Volta voice layer: an OpenAI Realtime agent that phones carriers, records progressive offer facts, and is bounded by deterministic policy rather than by its prompt. Calls launched from an order write immutable offer versions into that order's authoritative market and receive fresh instructions whenever the whole-market evaluator changes its decision. The standalone recovery APIs still keep their existing state in `volta_*` tables. Without `OPENAI_API_KEY`, answered calls play the placeholder TwiML message.
 
 ## Architecture
 
 ```text
 Human dashboard ─┐
-Future agents ───┼─> OrderMarketService ─> normalized SQLite state
+Voice agents ────┼─> OrderMarketService ─> normalized SQLite state
                  │        │
-Twilio webhooks ─┘        └─> derived market state and deterministic offer scoring
+Twilio webhooks ─┘        └─> whole-market feasibility, Pareto ranking, and actions
 
 Market call action -> existing Call service -> TwilioTelephonyProvider -> PSTN
 
@@ -23,12 +23,12 @@ Twilio webhooks -> signature validation -> call persistence
                                                     v
                                              OpenAI Realtime (SIP)
                                                     |
-                                             Volta agent + policy
+                                             Volta agent + deterministic market policy
 ```
 
-Orders and markets are separate records. Every market preserves its mandate snapshot, and every offer is immutable; a newer carrier offer links to the offer it supersedes. Calls link to order, market, and carrier. A partial unique index prevents two active commitments for the same market. The dashboard and future agents consume the same derived `getMarketState` result.
+Orders and markets are separate records. Every market preserves its mandate snapshot, and every progressive offer update creates an immutable version linked to the version it supersedes. Calls link to order, market, and carrier. A partial unique index prevents two active commitments for the same market. The dashboard and voice agents consume the same derived `getMarketState` result.
 
-The realtime agent arrived as a new `VoiceSessionAdapter`, exactly where this README said it belonged. Contact storage, batch creation, Twilio status handling, call history, and the dashboard did not change.
+The realtime agent is connected through `VoiceSessionAdapter`. Contact storage, concurrent batch creation, Twilio status handling, call history, and the existing SIP bridge are reused.
 
 ## The Volta voice layer
 
@@ -77,9 +77,10 @@ Invariants worth knowing before changing this code:
   final terms must match the selected quote exactly.
 - Uncorrelated legs are never bridged to the agent.
 
-This layer and the dashboard's own order/market service are two separate
-implementations of the same business idea. They share the call ledger and
-nothing else; converging them is deliberate future work.
+The standalone `/api/operations` recovery workflow above remains available.
+Order-launched procurement calls use a narrower tool surface: they cannot call
+`propose_commitment`; they write progressive facts into `OrderMarketService`,
+and only its transactional award gate can create the dashboard commitment.
 
 ## 1. Install and initialize
 
@@ -94,6 +95,11 @@ npm run db:migrate
 ```
 
 Put the real Twilio values in `secrets/twilio.md` using the exact documented key names. `secrets/` is gitignored. Environment variables remain supported and override the file. REST calls can authenticate with either `TWILIO_AUTH_TOKEN` or the `TWILIO_API_KEY_SID` / `TWILIO_API_KEY_SECRET` pair. Twilio webhook signature validation still requires `TWILIO_AUTH_TOKEN`; API keys cannot validate webhook signatures.
+
+For live Realtime calls, also set `OPENAI_API_KEY`, `OPENAI_PROJECT_ID`,
+`OPENAI_WEBHOOK_SECRET`, and `OPENAI_SIP_URI`. The SIP URI is derived from the
+project ID when omitted. `HUMAN_ESCALATION_URI` is optional; without it, a human
+takeover pauses that carrier lane and records the reason without transferring it.
 
 Start the app:
 
@@ -156,14 +162,15 @@ Twilio signatures are validated against `PUBLIC_BASE_URL` by default. A rejected
 ## 5. Order and market test
 
 1. Add up to three carriers. Mexican national-format numbers use `MX` as the default region; international numbers should include `+` and country code.
-2. Create an order with its target, maximum, timing mandate, priority weights, conditions, and selected carriers.
-3. Expand the order and press **Call carriers**. Verify the call records appear inside the market and in global call activity.
-4. Add at least the configured minimum number of valid offers. Add a later offer from the same carrier and confirm the earlier offer remains in history.
-5. Commit a valid offer. Confirm the order turns green and only one active commitment exists.
-6. Mark the carrier failed, create a recovery market, add replacement offers, and recommit. The failed market and commitment remain visible.
-7. Mark the transport completed. Confirm the order becomes gray and remains available under the Past filter.
+2. Create an order with its target, maximum, timing mandate, priority weights, required conditions, minimum feasible-offer count, and selected carriers.
+3. Expand the order and press **Call carriers**. Verify all call records appear immediately in the market and global call activity.
+4. Answer the carrier legs. Give one complete feasible quote, one partial quote, and one infeasible quote. Verify partial facts appear progressively and the strong carrier is held while unresolved lanes continue.
+5. Complete the partial quote. Verify the evaluator requests missing fields, negotiates only eligible frontier offers, releases dominated or infeasible carriers, and awards only after the market-close policy is satisfied.
+6. Confirm the winning commitment appears once and the order turns green. A late inbound better quote may be recorded, but must not revoke the closed award.
+7. For a recovery test, mark the committed carrier failed, create a recovery market, and repeat. The failed market and commitment remain visible.
+8. Mark the transport completed. Confirm the order becomes gray and remains available under the Past filter.
 
-The three Twilio REST requests use `Promise.allSettled`; one rejected destination does not stop the others.
+The carrier Twilio REST requests use `Promise.allSettled`; one rejected destination does not stop the others. A five-minute procurement deadline prevents an unanswered lane from blocking the market forever. Deadline evaluation currently runs when the dashboard polls `/api/orders`.
 
 The carrier directory also retains **Quick call** for direct telephony testing outside an order.
 

@@ -5,6 +5,7 @@ dist/
 .env
 .env.local
 /apikey.md
+/openai-api.md
 secrets/
 *.credentials.md
 *.sqlite

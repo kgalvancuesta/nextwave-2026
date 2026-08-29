@@ -5,11 +5,36 @@ export const ORDER_STATUSES = [
 ] as const;
 export type OrderStatus = (typeof ORDER_STATUSES)[number];
 
-export const MARKET_STATUSES = ["DRAFT", "OPEN", "CALLING", "NEGOTIATING", "COMMITTED", "CLOSED", "FAILED", "CANCELED"] as const;
+export const MARKET_STATUSES = ["DRAFT", "OPEN", "CALLING", "NEGOTIATING", "HUMAN_REVIEW", "COMMITTED", "CLOSED", "FAILED", "CANCELED"] as const;
 export type MarketStatus = (typeof MARKET_STATUSES)[number];
-export type MarketCarrierStatus = "SELECTED" | "CALLING" | "CONNECTED" | "NEGOTIATING" | "FINAL" | "COMPLETED" | "FAILED";
+export type MarketCarrierStatus =
+  | "SELECTED" | "CALLING" | "DISCOVERY" | "PARTIAL" | "OFFER" | "WAITING"
+  | "NEGOTIATING" | "HUMAN" | "RELEASED" | "FAILED" | "UNAVAILABLE" | "AWARDED" | "COMPLETED";
+export type OfferAvailability = "UNKNOWN" | "AVAILABLE" | "UNAVAILABLE";
+export type OfferClassification = "PARTIAL" | "COMPARABLE" | "FRONTIER" | "DOMINATED" | "INFEASIBLE";
+export type MarketPhase = "DISCOVERY" | "FRONTIER_NEGOTIATION" | "READY_TO_AWARD" | "HUMAN_REVIEW" | "CLOSED";
+export type EvaluatorAction =
+  | "ASK_MISSING_FIELD" | "CONTINUE_DISCOVERY" | "HOLD" | "NEGOTIATE"
+  | "CONFIRM" | "RELEASE" | "HUMAN_REQUIRED" | "REQUEST_HUMAN_REVIEW" | "AWARD";
 export type CommitmentStatus = "ACTIVE" | "INVALIDATED" | "FULFILLED";
 export type DemurrageRiskStatus = "MONITORED" | "AT_RISK" | "IN_PROGRESS" | "RESOLVED";
+
+export interface FeasibilityViolation {
+  code: "UNAVAILABLE" | "CURRENCY" | "MAXIMUM_PRICE" | "MANDATORY_ARRIVAL" | "REQUIRED_CONDITION";
+  message: string;
+  actual: string | number | null;
+  limit: string | number | null;
+  delta: number | null;
+}
+
+export interface MarketInstruction {
+  action: EvaluatorAction;
+  reason: string;
+  field: "availability" | "price" | "arrival" | "all_in" | "requirements" | null;
+  targetPrice: number | null;
+  targetArrival: string | null;
+  marketRevision: number;
+}
 
 export interface MandateSnapshot {
   targetPrice: number;
@@ -54,6 +79,11 @@ export interface MarketRecord {
   createdAt: string;
   updatedAt: string;
   closedAt: string | null;
+  revision: number;
+  startedAt: string | null;
+  procurementDeadlineAt: string | null;
+  automaticAward: boolean;
+  reviewReason: string | null;
 }
 
 export interface OfferRecord {
@@ -62,10 +92,23 @@ export interface OfferRecord {
   carrierId: string;
   carrierLabel: string;
   callId: string | null;
-  price: number;
-  currency: string;
+  version: number;
+  availability: OfferAvailability;
+  price: number | null;
+  currency: string | null;
+  rateAllIn: boolean | null;
   pickupTime: string | null;
   expectedArrival: string | null;
+  firm: boolean | null;
+  expiresAt: string | null;
+  accessorials: string[];
+  carrierConditions: string[];
+  confirmedRequirements: string[];
+  rejectedRequirements: string[];
+  rawStatement: string | null;
+  confidence: number | null;
+  humanRequired: boolean;
+  humanReason: string | null;
   waitingTimeIncluded: string | null;
   extraFees: string | null;
   conditions: string | null;
@@ -74,8 +117,14 @@ export interface OfferRecord {
   callbackAllowed: boolean;
   supersedesOfferId: string | null;
   createdAt: string;
+  isComparable: boolean;
   isValid: boolean;
   invalidReasons: string[];
+  feasibilityViolations: FeasibilityViolation[];
+  missingFields: Array<"availability" | "price" | "arrival" | "all_in" | "requirements">;
+  classification: OfferClassification;
+  isDominated: boolean;
+  isFrontier: boolean;
   score: number;
 }
 
@@ -108,6 +157,9 @@ export interface MarketCarrierState {
   latestOffer: OfferRecord | null;
   latestCall: CallRecord | null;
   rank: number | null;
+  instruction: MarketInstruction;
+  negotiationRounds: number;
+  humanReason: string | null;
 }
 
 export interface MarketState {
@@ -123,6 +175,10 @@ export interface MarketState {
   offers: OfferRecord[];
   bestOffer: OfferRecord | null;
   cheapestOffer: OfferRecord | null;
+  nearFeasibleOffers: OfferRecord[];
+  phase: MarketPhase;
+  awardReady: boolean;
+  reviewReason: string | null;
   activeCommitment: CommitmentRecord | null;
 }
 
@@ -134,4 +190,16 @@ export interface OrderWorkspace {
   events: OrderEventRecord[];
   nautaCalls: CallRecord[];
   collapsedSummary: string;
+}
+
+export function publicOrderReference(order: Pick<OrderRecord, "id" | "reference">): string {
+  return order.reference?.trim() || generatedOrderReference(order.id);
+}
+
+export function generatedOrderReference(orderId: string): string {
+  return `ORD-${orderId.replaceAll("-", "").slice(0, 8).toUpperCase()}`;
+}
+
+export function normalizeOrderReference(reference: string): string {
+  return reference.trim().toUpperCase().replaceAll(/[^A-Z0-9]/g, "");
 }

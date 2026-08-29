@@ -10,6 +10,8 @@ export type VoltaCallKind =
   | "direct"
   /** A carrier-market call that may only collect a quote. */
   | "carrier_quote"
+  /** A call participating in the dashboard's shared procurement market. */
+  | "procurement"
   /** The read-back call with the carrier the policy already selected. */
   | "carrier_confirmation";
 

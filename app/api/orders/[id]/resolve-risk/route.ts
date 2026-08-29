@@ -1,5 +1,6 @@
 import { apiError } from "@/lib/http";
 import { getOrderMarketService } from "@/lib/market-service";
+import { publicOrderReference } from "@/lib/market-types";
 import { getVoiceControlService } from "@/lib/volta/service";
 
 export const runtime = "nodejs";
@@ -27,7 +28,7 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
     const workspace = orders.beginNautaRiskRecovery(id);
     const voice = getVoiceControlService();
     const operation = voice.createOperation({
-      externalReference: `order:${workspace.order.id}`,
+      externalReference: publicOrderReference(workspace.order),
       objective: `Avoid demurrage for ${workspace.order.reference || workspace.order.name}: confirm ETA, secure pickup before free time ends, or negotiate an extension/fee waiver.`,
       mandate: {
         currency: workspace.order.currency,

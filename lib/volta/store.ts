@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { callStatusRank } from "@/lib/call-status";
 import { getDatabase } from "@/lib/db";
+import { normalizeOrderReference, publicOrderReference } from "@/lib/market-types";
 import type { CallStatus as TelephonyCallStatus } from "@/lib/types";
 import type {
   CallEvent,
@@ -52,8 +53,30 @@ export class VoltaStore implements StateStore {
   }
 
   findOperationByReference(reference: string): Operation | null {
-    const row = this.db.prepare("SELECT * FROM volta_operations WHERE external_reference = ?").get(reference) as Row | undefined;
-    return row ? toOperation(row) : null;
+    const normalized = normalizeOrderReference(reference);
+    if (!normalized) return null;
+
+    const exactRows = this.db.prepare("SELECT * FROM volta_operations WHERE external_reference = ? COLLATE NOCASE")
+      .all(reference.trim()) as Row[];
+    if (exactRows.length === 1) return toOperation(exactRows[0]!);
+    if (exactRows.length > 1) return null;
+
+    const operationRows = this.db.prepare("SELECT * FROM volta_operations").all() as Row[];
+    const directMatches = operationRows.filter((row) => normalizeOrderReference(String(row.external_reference)) === normalized);
+    if (directMatches.length === 1) return toOperation(directMatches[0]!);
+    if (directMatches.length > 1) return null;
+
+    // Orders created before their voice operation used the internal order UUID
+    // as external_reference. Keep those operations reachable through the public
+    // order/reference number shown in the dashboard.
+    const linkedRows = this.db.prepare(`SELECT volta_operations.*,
+      orders.id AS linked_order_id, orders.reference AS linked_order_reference
+      FROM orders JOIN volta_operations ON volta_operations.id = orders.volta_operation_id`).all() as Row[];
+    const linkedMatches = linkedRows.filter((row) => normalizeOrderReference(publicOrderReference({
+      id: String(row.linked_order_id),
+      reference: nullableString(row.linked_order_reference),
+    })) === normalized);
+    return linkedMatches.length === 1 ? toOperation(linkedMatches[0]!) : null;
   }
 
   getOperationSnapshot(id: string) {

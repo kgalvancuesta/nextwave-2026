@@ -29,8 +29,8 @@ export function buildAgentProfile(input: {
     return {
       kind: "intake",
       instructions: [...BASE_INSTRUCTIONS,
-        "This call is not linked to an operation. Only identify the caller and shipment reference.",
-        "Use identify_operation before discussing prices, schedules, or operational details.",
+        "This call is not linked to an order. Ask for the order/reference number shown on the order.",
+        "Use identify_operation with that order/reference number before discussing prices, schedules, or operational details.",
       ].join("\n"),
     };
   }

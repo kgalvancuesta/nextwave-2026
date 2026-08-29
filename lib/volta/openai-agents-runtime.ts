@@ -14,6 +14,16 @@ export interface OpenAiAgentsRuntimeOptions {
 
 const WORKFLOW_NAME = "volta-voice-operations";
 
+export const REALTIME_INPUT_AUDIO_CONFIG = {
+  noiseReduction: { type: "far_field" as const },
+  turnDetection: {
+    type: "semantic_vad" as const,
+    eagerness: "low" as const,
+    createResponse: true,
+    interruptResponse: true,
+  },
+};
+
 /**
  * Runs the Volta agent on OpenAI's Agents SDK over a SIP-initiated Realtime
  * call. The SDK owns the socket, the tool-call protocol, and the guardrail
@@ -54,6 +64,13 @@ export class OpenAiAgentsRuntime implements RealtimeAgentGateway {
       apiKey,
       model: this.options.model,
       context,
+      config: {
+        audio: {
+          input: {
+            ...REALTIME_INPUT_AUDIO_CONFIG,
+          },
+        },
+      },
       outputGuardrails: voltaOutputGuardrails(),
       workflowName: WORKFLOW_NAME,
       traceMetadata: { internal_call_id: input.callId, call_kind: input.profile.kind },
@@ -69,6 +86,11 @@ export class OpenAiAgentsRuntime implements RealtimeAgentGateway {
       ...sessionOptions,
       transport: new OpenAIRealtimeSIP(),
     });
+    const opening = new OpeningResponseCoordinator(() => {
+      if (session.transport.requestResponse) session.transport.requestResponse();
+      else session.transport.sendEvent({ type: "response.create" });
+    });
+    wireOpeningResponse(session, opening);
     wireAudit(session, input.onAudit);
     await session.connect({ apiKey, callId: input.realtimeCallId });
 
@@ -87,9 +109,10 @@ export class OpenAiAgentsRuntime implements RealtimeAgentGateway {
         });
       },
       requestResponse() {
-        session.transport.sendEvent({ type: "response.create" });
+        opening.request();
       },
       close() {
+        opening.close();
         session.close();
       },
     };
@@ -115,6 +138,104 @@ export class OpenAiAgentsRuntime implements RealtimeAgentGateway {
 }
 
 /**
+ * Starts an outbound greeting only when the remote leg is quiet. Carrier
+ * greetings and voicemail often begin while the SIP sideband is connecting;
+ * sending response.create immediately in that window causes the opening to be
+ * interrupted before any audio is heard. Server VAD can answer first, while
+ * this coordinator supplies a bounded fallback when it does not.
+ */
+export class OpeningResponseCoordinator {
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private remoteSpeaking = false;
+  private responseActive = false;
+  private requestPending = false;
+  private openingComplete = false;
+  private closed = false;
+
+  constructor(
+    private readonly sendResponse: () => void,
+    private readonly quietDelayMs = 750,
+  ) {}
+
+  request(): void {
+    if (this.closed) return;
+    if (this.openingComplete) {
+      this.sendResponse();
+      return;
+    }
+    this.schedule();
+  }
+
+  onRemoteSpeechStarted(): void {
+    this.remoteSpeaking = true;
+    this.clearTimer();
+  }
+
+  onRemoteSpeechStopped(): void {
+    this.remoteSpeaking = false;
+    this.schedule();
+  }
+
+  onResponseCreated(): void {
+    this.requestPending = false;
+    this.responseActive = true;
+    this.clearTimer();
+  }
+
+  onResponseDone(): void {
+    this.requestPending = false;
+    this.responseActive = false;
+    this.schedule();
+  }
+
+  onAudioStopped(): void {
+    this.openingComplete = true;
+    this.requestPending = false;
+    this.responseActive = false;
+    this.clearTimer();
+  }
+
+  onAudioInterrupted(): void {
+    this.openingComplete = false;
+  }
+
+  close(): void {
+    this.closed = true;
+    this.clearTimer();
+  }
+
+  private schedule(): void {
+    if (this.closed || this.openingComplete || this.remoteSpeaking || this.responseActive || this.requestPending || this.timer) return;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      if (this.closed || this.openingComplete || this.remoteSpeaking || this.responseActive || this.requestPending) return;
+      this.requestPending = true;
+      this.sendResponse();
+    }, this.quietDelayMs);
+  }
+
+  private clearTimer(): void {
+    if (!this.timer) return;
+    clearTimeout(this.timer);
+    this.timer = null;
+  }
+}
+
+function wireOpeningResponse(
+  session: RealtimeSession<VoltaAgentContext>,
+  opening: OpeningResponseCoordinator,
+): void {
+  session.on("audio_stopped", () => opening.onAudioStopped());
+  session.on("audio_interrupted", () => opening.onAudioInterrupted());
+  session.on("transport_event", (event) => {
+    if (event.type === "input_audio_buffer.speech_started") opening.onRemoteSpeechStarted();
+    else if (event.type === "input_audio_buffer.speech_stopped") opening.onRemoteSpeechStopped();
+    else if (event.type === "response.created") opening.onResponseCreated();
+    else if (event.type === "response.done") opening.onResponseDone();
+  });
+}
+
+/**
  * Everything the agent does that a human reviewer would need after the fact.
  * Tool arguments are not recorded here: the policy layer already persists the
  * validated payload together with its decision.
@@ -129,6 +250,12 @@ function wireAudit(
   session.on("agent_tool_end", (_context, _agent, agentTool, result) => {
     onAudit("agent.tool_completed", { tool: agentTool.name, result });
   });
+  session.on("agent_end", (_context, _agent, output) => {
+    onAudit("agent.turn_completed", { transcript: output });
+  });
+  session.on("audio_start", () => onAudit("agent.audio_started", {}));
+  session.on("audio_stopped", () => onAudit("agent.audio_stopped", {}));
+  session.on("audio_interrupted", () => onAudit("agent.audio_interrupted", {}));
   session.on("guardrail_tripped", (_context, _agent, error, details) => {
     onAudit("agent.guardrail_tripped", { itemId: details.itemId, message: error.message });
   });
@@ -138,6 +265,16 @@ function wireAudit(
   session.on("transport_event", (event) => {
     if (event.type === "conversation.item.input_audio_transcription.completed") {
       onAudit("transcript.turn", { itemId: event.item_id, transcript: event.transcript });
+    } else if (event.type === "input_audio_buffer.speech_started") {
+      onAudit("audio.input_started", { itemId: event.item_id, audioStartMs: event.audio_start_ms });
+    } else if (event.type === "input_audio_buffer.speech_stopped") {
+      onAudit("audio.input_stopped", { itemId: event.item_id, audioEndMs: event.audio_end_ms });
+    } else if (event.type === "response.done") {
+      onAudit("agent.response_done", {
+        responseId: event.response.id ?? null,
+        status: event.response.status ?? null,
+        statusDetails: event.response.status_details ?? null,
+      });
     }
   });
 }

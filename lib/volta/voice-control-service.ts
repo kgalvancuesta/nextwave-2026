@@ -19,6 +19,8 @@ import type {
   RealtimeAgentGateway,
   RecapGateway,
   StateStore,
+  ProcurementVoicePort,
+  ProcurementControlUpdate,
 } from "./ports";
 
 interface ServiceOptions {
@@ -45,6 +47,7 @@ export class VoiceControlService {
     private readonly telephony: OutboundTelephonyGateway,
     private readonly recaps: RecapGateway,
     private readonly options: ServiceOptions,
+    private readonly procurement?: ProcurementVoicePort,
   ) {}
 
   createOperation(input: unknown) {
@@ -246,6 +249,8 @@ export class VoiceControlService {
       call = this.store.getCall(call.id)!;
     }
 
+    this.procurement?.prepareCall(call.id);
+
     const attachedCallId = call.id;
     const profile = this.buildCallProfile(call);
     const session = await this.realtime.startCall({
@@ -335,6 +340,11 @@ export class VoiceControlService {
     if (name === "identify_operation") {
       if (call.operationId) return { ok: true, operation_id: call.operationId, already_attached: true };
       const reference = z.string().min(1).parse(args.external_reference);
+      const procurement = this.procurement?.identifyCall(call.id, reference);
+      if (procurement?.attached) {
+        await this.refreshCallProfile(call.id);
+        return { ok: true, procurement_market_attached: true, attachment: procurement.result };
+      }
       const operation = this.store.findOperationByReference(reference);
       if (!operation) return { ok: false, error: "operation_not_found", escalate: true };
       this.store.attachCallToOperation(call.id, operation.id);
@@ -367,8 +377,34 @@ export class VoiceControlService {
       };
     }
 
+    if (name === "record_procurement_update") {
+      if (!this.procurement) throw new Error("Procurement workflow is not configured");
+      const outcome = this.procurement.recordUpdate(call.id, args);
+      this.propagateProcurementUpdates(outcome.controlUpdates);
+      return outcome.result;
+    }
+
+    if (name === "get_procurement_instruction") {
+      if (!this.procurement) throw new Error("Procurement workflow is not configured");
+      return this.procurement.getInstruction(call.id);
+    }
+
+    if (name === "finish_procurement_call") {
+      if (!this.procurement) throw new Error("Procurement workflow is not configured");
+      const marketRevision = z.number().int().nonnegative().parse(args.marketRevision);
+      const result = this.procurement.validateFinish(call.id, marketRevision);
+      if (call.realtimeCallId) await this.realtime.hangup(call.realtimeCallId);
+      this.store.updateCall(call.id, { status: "completed", endedAt: new Date().toISOString() });
+      this.store.appendEvent(call.id, "procurement.call_finished", { marketRevision, disposition: args.disposition });
+      this.sessions.get(call.id)?.close();
+      this.sessions.delete(call.id);
+      return result;
+    }
+
     if (name === "request_human_escalation") {
       const reason = z.string().min(1).parse(args.reason);
+      const procurement = this.procurement?.markHumanRequired(call.id, reason);
+      if (procurement) this.propagateProcurementUpdates(procurement.controlUpdates);
       if (!call.realtimeCallId || !this.options.humanEscalationUri) {
         this.store.appendEvent(call.id, "escalation.failed", { reason, error: "target_not_configured" });
         return { ok: false, error: "human escalation target is not configured" };
@@ -424,10 +460,22 @@ export class VoiceControlService {
 
   /** The agent brief for a call, derived from server state only. */
   private buildCallProfile(call: CallRecord): AgentCallProfile {
+    const procurementProfile = this.procurement?.getProfile(call.id);
+    if (procurementProfile) return procurementProfile;
     const operation = call.operationId ? this.store.getOperation(call.operationId) : null;
     const market = call.marketId ? this.store.getCarrierMarket(call.marketId) : null;
     const selectedQuote = market?.selectedQuoteId ? this.store.getCarrierQuote(market.selectedQuoteId) : null;
     return buildAgentProfile({ call, operation, market, selectedQuote });
+  }
+
+  private propagateProcurementUpdates(updates: ProcurementControlUpdate[]): void {
+    for (const update of updates) {
+      const session = this.sessions.get(update.callId);
+      if (!session) continue;
+      session.injectContext(update.instruction);
+      session.requestResponse();
+      this.store.appendEvent(update.callId, "procurement.market_instruction_updated", { instruction: update.instruction });
+    }
   }
 
   private refreshMarketReadiness(marketId: string): void {

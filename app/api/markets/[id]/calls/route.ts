@@ -22,7 +22,7 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
       provider: new TwilioTelephonyProvider(config),
       context: { orderId: market.orderId, marketId: market.id },
     });
-    return Response.json({ batch: result, market: service.getMarketState(id) }, { status: 202 });
+    return Response.json({ batch: result, market: service.reevaluateMarket(id) }, { status: 202 });
   } catch (error) {
     return apiError(error);
   }

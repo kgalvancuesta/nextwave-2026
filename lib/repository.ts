@@ -278,11 +278,12 @@ export class MarketlineRepository {
     const carrierId = nullableString(row?.carrier_id);
     if (!marketId || !orderId || !carrierId) return;
     const now = new Date().toISOString();
-    const carrierStatus = status === "IN_PROGRESS" ? "CONNECTED"
+    const carrierStatus = status === "IN_PROGRESS" ? "DISCOVERY"
       : ["FAILED", "BUSY", "NO_ANSWER", "CANCELED"].includes(status) ? "FAILED"
         : isTerminalCallStatus(status) ? "COMPLETED" : "CALLING";
-    this.db.prepare("UPDATE market_carriers SET status = ?, updated_at = ? WHERE market_id = ? AND carrier_id = ?")
-      .run(carrierStatus, now, marketId, carrierId);
+    this.db.prepare(`UPDATE market_carriers SET status = CASE
+      WHEN status IN ('HUMAN', 'RELEASED', 'AWARDED') THEN status ELSE ? END, updated_at = ?
+      WHERE market_id = ? AND carrier_id = ?`).run(carrierStatus, now, marketId, carrierId);
     if (status === "IN_PROGRESS" && previousStatus !== "IN_PROGRESS") {
       this.db.prepare(`INSERT INTO order_events (id, order_id, market_id, call_id, event_type, detail, created_at)
         VALUES (?, ?, ?, ?, 'CALL_ANSWERED', 'Carrier answered', ?)`).run(randomUUID(), orderId, marketId, callId, now);
@@ -293,6 +294,9 @@ export class MarketlineRepository {
     if (total > 0 && active === 0) {
       this.db.prepare("UPDATE markets SET status = CASE WHEN status = 'CALLING' THEN 'OPEN' ELSE status END, updated_at = ? WHERE id = ?")
         .run(now, marketId);
+    }
+    if (status !== previousStatus) {
+      this.db.prepare("UPDATE markets SET revision = revision + 1, updated_at = ? WHERE id = ?").run(now, marketId);
     }
     this.db.prepare("UPDATE orders SET updated_at = ? WHERE id = ?").run(now, orderId);
   }

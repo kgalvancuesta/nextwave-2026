@@ -59,9 +59,34 @@ const commitmentArgs = z.object({
 
 const escalationArgs = z.object({ reason: z.string() });
 
+const procurementUpdateArgs = z.object({
+  availability: z.enum(["UNKNOWN", "AVAILABLE", "UNAVAILABLE"]),
+  price: z.number().int().nonnegative().nullable(),
+  currency: z.string().length(3).nullable(),
+  rateAllIn: z.boolean().nullable(),
+  pickupTime: z.string().nullable().describe("ISO 8601 when known; otherwise the carrier's exact relative phrase, such as 'in 2 hours'."),
+  expectedArrival: z.string().nullable().describe("ISO 8601 when known; otherwise the carrier's exact relative phrase, such as 'in 12 hours'. The server normalizes relative time."),
+  firm: z.boolean().nullable(),
+  expiresAt: z.string().nullable().describe("ISO 8601 when known; otherwise the carrier's exact relative phrase."),
+  accessorials: z.array(z.string()),
+  carrierConditions: z.array(z.string()),
+  confirmedRequirements: z.array(z.string()),
+  rejectedRequirements: z.array(z.string()),
+  rawStatement: z.string().nullable(),
+  confidence: z.number().min(0).max(1).nullable(),
+  humanRequired: z.boolean(),
+  humanReason: z.string().nullable(),
+});
+
+const procurementInstructionArgs = z.object({});
+const finishProcurementArgs = z.object({
+  marketRevision: z.number().int().nonnegative(),
+  disposition: z.enum(["RELEASE", "COMPLETE"]),
+});
+
 const identifyOperation = tool<typeof identifyOperationArgs, ToolContext, string>({
   name: "identify_operation",
-  description: "Attach an unassigned inbound call to an operation after the caller provides its reference.",
+  description: "Attach an unassigned inbound call to an order after the caller provides the order/reference number shown on the order.",
   parameters: identifyOperationArgs,
   execute: (input, runContext) => invoke(runContext, "identify_operation", input),
   errorFunction: toolFailure,
@@ -99,6 +124,30 @@ const requestHumanEscalation = tool<typeof escalationArgs, ToolContext, string>(
   errorFunction: toolFailure,
 });
 
+const recordProcurementUpdate = tool<typeof procurementUpdateArgs, ToolContext, string>({
+  name: "record_procurement_update",
+  description: "Persist every useful availability, all-in price, arrival, requirement confirmation, or changed term immediately. Supply every key; use null or [] for facts the carrier has not stated. Relative times are accepted verbatim and normalized by the server.",
+  parameters: procurementUpdateArgs,
+  execute: (input, runContext) => invoke(runContext, "record_procurement_update", procurementPatch(input)),
+  errorFunction: procurementToolFailure,
+});
+
+const getProcurementInstruction = tool<typeof procurementInstructionArgs, ToolContext, string>({
+  name: "get_procurement_instruction",
+  description: "Reload the current market-wide evaluator instruction immediately before any counter, release, or conclusion.",
+  parameters: procurementInstructionArgs,
+  execute: (input, runContext) => invoke(runContext, "get_procurement_instruction", input),
+  errorFunction: procurementToolFailure,
+});
+
+const finishProcurementCall = tool<typeof finishProcurementArgs, ToolContext, string>({
+  name: "finish_procurement_call",
+  description: "After saying goodbye, end a released or completed procurement call. The server rejects stale market revisions.",
+  parameters: finishProcurementArgs,
+  execute: (input, runContext) => invoke(runContext, "finish_procurement_call", input),
+  errorFunction: procurementToolFailure,
+});
+
 /**
  * The tool surface is the real policy boundary, not the prompt. A quote call
  * cannot reach propose_commitment at all, and an unidentified inbound call
@@ -111,6 +160,8 @@ export function toolsForKind(kind: VoltaCallKind) {
       return [identifyOperation, recordBriefItem, requestHumanEscalation];
     case "carrier_quote":
       return [recordBriefItem, recordCarrierQuote, requestHumanEscalation];
+    case "procurement":
+      return [recordBriefItem, recordProcurementUpdate, getProcurementInstruction, finishProcurementCall, requestHumanEscalation];
     case "carrier_confirmation":
       return [recordBriefItem, proposeCommitment, requestHumanEscalation];
     case "direct":
@@ -136,6 +187,26 @@ function toolFailure(_runContext: RunContext<ToolContext>, error: unknown): stri
   });
 }
 
+function procurementToolFailure(_runContext: RunContext<ToolContext>, error: unknown): string {
+  return JSON.stringify({
+    ok: false,
+    error: error instanceof Error ? error.message : String(error),
+    retry: true,
+    escalate: false,
+    instruction: "Retry the failed procurement tool once. For record_procurement_update, supply every key and use null or [] for unknown values. A payload, date-format, or stale-revision error is not a reason to request human escalation.",
+  });
+}
+
 function withoutNulls<T extends Record<string, unknown>>(value: T): Record<string, unknown> {
   return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== null));
+}
+
+function procurementPatch(value: z.infer<typeof procurementUpdateArgs>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).filter(([key, entry]) => {
+    if (entry === null) return false;
+    if (Array.isArray(entry) && entry.length === 0) return false;
+    if (key === "availability" && entry === "UNKNOWN") return false;
+    if (key === "humanRequired" && entry === false) return false;
+    return true;
+  }));
 }

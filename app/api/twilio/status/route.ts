@@ -1,6 +1,7 @@
 import { handleStatusCallback } from "@/lib/call-service";
 import { loadTelephonyConfig } from "@/lib/config";
 import { apiError } from "@/lib/http";
+import { getOrderMarketService } from "@/lib/market-service";
 import { getRepository } from "@/lib/repository";
 import { parseTwilioForm, validateTwilioWebhook } from "@/lib/twilio-webhook";
 
@@ -16,7 +17,8 @@ export async function POST(request: Request) {
     }
     const internalCallId = new URL(request.url).searchParams.get("callId");
     if (internalCallId && params.CallSid) getRepository().attachTwilioSidIfMissing(internalCallId, params.CallSid);
-    handleStatusCallback({ params, repository: getRepository() });
+    const call = handleStatusCallback({ params, repository: getRepository() });
+    if (call.marketId) getOrderMarketService().reevaluateMarket(call.marketId);
     return new Response(null, { status: 204 });
   } catch (error) {
     return apiError(error);

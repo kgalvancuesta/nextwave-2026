@@ -25,7 +25,9 @@ export async function POST(request: Request) {
     let event: unknown;
     try {
       event = await verifier.verifyWebhook(rawBody, headers);
-    } catch {
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "Unknown signature verification error";
+      console.warn(`Rejected OpenAI webhook: ${reason}`);
       return Response.json({ error: "Invalid OpenAI webhook signature." }, { status: 400 });
     }
 

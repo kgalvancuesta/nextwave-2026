@@ -107,7 +107,7 @@ export function NewOrderModal({ contacts, onClose, onCreated, onAddCarrier }: Pr
             <div className="mt-4 grid gap-4 sm:grid-cols-2">
               <Field label="Order name" error={visibleErrors.name} wide><input data-field="name" aria-invalid={Boolean(visibleErrors.name)} autoFocus className="field-input" value={draft.name} onChange={(e) => update("name", e.target.value)} placeholder="Textiles Pacífico — Manzanillo → Guadalajara" /></Field>
               <Field label="Client" error={visibleErrors.client}><input data-field="client" aria-invalid={Boolean(visibleErrors.client)} className="field-input" value={draft.client} onChange={(e) => update("client", e.target.value)} placeholder="Textiles Pacífico" /></Field>
-              <Field label="Container / reference"><input className="field-input" value={draft.reference} onChange={(e) => update("reference", e.target.value)} placeholder="TCLU1234567" /></Field>
+              <Field label="Order / reference number"><input className="field-input" value={draft.reference} onChange={(e) => update("reference", e.target.value)} placeholder="TCLU1234567 (generated if blank)" /></Field>
               <Field label="Origin" error={visibleErrors.origin}><input data-field="origin" aria-invalid={Boolean(visibleErrors.origin)} className="field-input" value={draft.origin} onChange={(e) => update("origin", e.target.value)} placeholder="Port of Manzanillo" /></Field>
               <Field label="Destination" error={visibleErrors.destination}><input data-field="destination" aria-invalid={Boolean(visibleErrors.destination)} className="field-input" value={draft.destination} onChange={(e) => update("destination", e.target.value)} placeholder="Guadalajara warehouse" /></Field>
             </div>

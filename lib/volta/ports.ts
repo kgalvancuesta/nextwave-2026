@@ -69,6 +69,27 @@ export interface RecapGateway {
   }): Promise<{ deliveryId: string }>;
 }
 
+export interface ProcurementControlUpdate {
+  callId: string;
+  instruction: string;
+}
+
+export interface ProcurementToolOutcome {
+  result: unknown;
+  controlUpdates: ProcurementControlUpdate[];
+}
+
+/** Adapter from a live Realtime call into the dashboard's authoritative procurement market. */
+export interface ProcurementVoicePort {
+  prepareCall(callId: string): void;
+  getProfile(callId: string): AgentCallProfile | null;
+  identifyCall(callId: string, reference: string): { attached: boolean; result: unknown };
+  recordUpdate(callId: string, input: unknown): ProcurementToolOutcome;
+  getInstruction(callId: string): unknown;
+  markHumanRequired(callId: string, reason: string): ProcurementToolOutcome | null;
+  validateFinish(callId: string, marketRevision: number): unknown;
+}
+
 /** A live agent attached to one call. Owned by the process that accepted it. */
 export interface AgentCallSession {
   /**

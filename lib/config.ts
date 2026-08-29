@@ -82,9 +82,16 @@ export interface VoltaConfig {
  * rather than silently answering a carrier with no negotiation policy loaded.
  */
 export function loadVoltaConfig(): VoltaConfig {
-  const openAiApiKey = process.env.OPENAI_API_KEY?.trim();
-  const openAiWebhookSecret = process.env.OPENAI_WEBHOOK_SECRET?.trim();
-  const sipUri = process.env.OPENAI_SIP_URI?.trim();
+  const fileCredentials = readOpenAiCredentialsFile(process.env.OPENAI_CREDENTIALS_FILE);
+  const openAiApiKey = process.env.OPENAI_API_KEY?.trim()
+    || readSecretFile(process.env.OPENAI_API_KEY_FILE)
+    || fileCredentials.apiKey;
+  const openAiWebhookSecret = process.env.OPENAI_WEBHOOK_SECRET?.trim()
+    || fileCredentials.webhookSecret;
+  const projectId = process.env.OPENAI_PROJECT_ID?.trim() || fileCredentials.projectId;
+  const sipUri = process.env.OPENAI_SIP_URI?.trim()
+    || fileCredentials.sipUri
+    || (projectId ? `sip:${projectId}@sip.api.openai.com;transport=tls` : undefined);
   const missing = [
     openAiApiKey ? null : "OPENAI_API_KEY",
     openAiWebhookSecret ? null : "OPENAI_WEBHOOK_SECRET",
@@ -97,11 +104,39 @@ export function loadVoltaConfig(): VoltaConfig {
   return {
     openAiApiKey: openAiApiKey!,
     openAiWebhookSecret: openAiWebhookSecret!,
-    realtimeModel: process.env.OPENAI_REALTIME_MODEL?.trim() || "gpt-realtime",
+    realtimeModel: process.env.OPENAI_REALTIME_MODEL?.trim() || "gpt-realtime-2.1",
     voice: process.env.OPENAI_VOICE?.trim() || "marin",
     sipUri: sipUri!,
     humanEscalationUri: process.env.HUMAN_ESCALATION_URI?.trim() || null,
   };
+}
+
+interface OpenAiFileCredentials {
+  apiKey?: string;
+  projectId?: string;
+  webhookSecret?: string;
+  sipUri?: string;
+}
+
+function readOpenAiCredentialsFile(path: string | undefined): OpenAiFileCredentials {
+  if (!path?.trim()) return {};
+  const content = readFileSync(resolve(path.trim()), "utf8");
+  return {
+    apiKey: credentialValue(content, "OPENAI_API_KEY", /\bsk-[A-Za-z0-9_-]+\b/),
+    projectId: credentialValue(content, "OPENAI_PROJECT_ID", /\bproj_[A-Za-z0-9_-]+\b/),
+    webhookSecret: credentialValue(content, "OPENAI_WEBHOOK_SECRET", /\bwhsec_[A-Za-z0-9_+/=-]+/),
+    sipUri: credentialValue(content, "OPENAI_SIP_URI", /\bsips?:[^\s`]+/),
+  };
+}
+
+function credentialValue(content: string, name: string, fallbackPattern: RegExp): string | undefined {
+  const labeled = content.match(new RegExp(`^\\s*(?:[-*]\\s*)?${name}\\s*[:=]\\s*(?:\\x60)?([^\\x60\\r\\n]+)(?:\\x60)?\\s*$`, "m"));
+  return labeled?.[1]?.trim() || content.match(fallbackPattern)?.[0];
+}
+
+function readSecretFile(path: string | undefined): string | undefined {
+  if (!path?.trim()) return undefined;
+  return readFileSync(resolve(path.trim()), "utf8").trim() || undefined;
 }
 
 function parsePublicBaseUrl(input: string | undefined): string {

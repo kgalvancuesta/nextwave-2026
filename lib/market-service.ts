@@ -4,6 +4,14 @@ import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { isActiveCallStatus } from "./call-status";
 import { getDatabase } from "./db";
+import {
+  checkOfferFeasibility,
+  evaluateMarket,
+  evaluateOffers,
+  type MarketEvaluation,
+  type ProcurementOfferFacts,
+  type EvaluatedProcurementOffer,
+} from "./procurement-evaluator";
 import type {
   CommitmentRecord,
   DemurrageRiskStatus,
@@ -11,12 +19,15 @@ import type {
   MarketCarrierState,
   MarketRecord,
   MarketState,
+  MarketInstruction,
+  OfferAvailability,
   OfferRecord,
   OrderEventRecord,
   OrderRecord,
   OrderStatus,
   OrderWorkspace,
 } from "./market-types";
+import { generatedOrderReference, normalizeOrderReference } from "./market-types";
 import { MarketlineRepository } from "./repository";
 import type { Contact } from "./types";
 
@@ -56,6 +67,43 @@ export interface RecordOfferInput {
   isFinalOffer?: boolean;
   requiresImmediateDecision?: boolean;
   callbackAllowed?: boolean;
+  confirmedRequirements?: string[];
+  rejectedRequirements?: string[];
+}
+
+export interface ProgressiveOfferUpdateInput {
+  availability?: OfferAvailability;
+  price?: number | null;
+  currency?: string | null;
+  rateAllIn?: boolean | null;
+  pickupTime?: string | null;
+  expectedArrival?: string | null;
+  firm?: boolean | null;
+  expiresAt?: string | null;
+  accessorials?: string[];
+  carrierConditions?: string[];
+  confirmedRequirements?: string[];
+  rejectedRequirements?: string[];
+  rawStatement?: string | null;
+  confidence?: number | null;
+  humanRequired?: boolean;
+  humanReason?: string | null;
+}
+
+export interface InboundMarketAttachment {
+  status: "ATTACHED" | "AMBIGUOUS" | "NOT_FOUND" | "CLOSED";
+  marketId: string | null;
+  candidates: Array<{ marketId: string; orderReference: string }>;
+}
+
+export interface ProcurementCallContext {
+  callId: string;
+  order: OrderRecord;
+  market: MarketRecord;
+  carrier: Contact;
+  latestOffer: OfferRecord | null;
+  instruction: MarketInstruction;
+  marketClosed: boolean;
 }
 
 export class OrderMarketService {
@@ -71,6 +119,11 @@ export class OrderMarketService {
     if (contacts.length !== input.carrierIds.length) throw new Error("One or more selected carriers no longer exist.");
     const now = new Date().toISOString();
     const orderId = randomUUID();
+    const reference = input.reference?.trim() || generatedOrderReference(orderId);
+    const normalizedReference = normalizeOrderReference(reference);
+    const existingReference = (this.db.prepare("SELECT reference FROM orders WHERE reference IS NOT NULL").all() as Row[])
+      .some((row) => normalizeOrderReference(String(row.reference)) === normalizedReference);
+    if (existingReference) throw new Error(`Order/reference number already exists: ${reference}`);
     const marketId = randomUUID();
     const conditions = input.conditions.map((condition) => condition.trim()).filter(Boolean);
     const mandate = mandateFromInput(input, conditions);
@@ -82,7 +135,7 @@ export class OrderMarketService {
         desired_carriers, lifecycle_status, free_time_ends_at, current_eta, daily_demurrage_rate, risk_status, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SOURCING', ?, ?, ?, ?, ?, ?)`).run(
         orderId, input.name.trim(), input.client.trim(), input.origin.trim(), input.destination.trim(),
-        input.reference?.trim() || null, input.currency, input.targetPrice, input.maximumPrice,
+        reference, input.currency, input.targetPrice, input.maximumPrice,
         nullableDate(input.preferredArrival), nullableDate(input.mustArriveBy), input.priceWeight,
         input.speedWeight, input.minimumValidOffers, input.desiredCarriers, nullableDate(input.freeTimeEndsAt), nullableDate(input.currentEta),
         input.dailyDemurrageRate || 0, initialRiskStatus(input, now), now, now,
@@ -115,6 +168,12 @@ export class OrderMarketService {
         ELSE 3 END,
       updated_at DESC`).all() as Row[];
     return rows.map((row) => this.getOrder(String(row.id))!).filter(Boolean);
+  }
+
+  reevaluateExpiredMarkets(now = new Date().toISOString()): void {
+    const rows = this.db.prepare(`SELECT id FROM markets WHERE procurement_deadline_at IS NOT NULL
+      AND procurement_deadline_at <= ? AND status IN ('CALLING', 'NEGOTIATING', 'OPEN', 'HUMAN_REVIEW')`).all(now) as Row[];
+    for (const row of rows) this.reevaluateMarket(String(row.id));
   }
 
   getOrder(orderId: string): OrderWorkspace | null {
@@ -152,9 +211,13 @@ export class OrderMarketService {
     const carrierIds = this.getMarketCarrierIds(marketId);
     if (carrierIds.length < 1 || carrierIds.length > 3) throw new Error("A market must have between one and three selected carriers to start calls.");
     const now = new Date().toISOString();
+    const deadline = new Date(Date.parse(now) + 5 * 60_000).toISOString();
     this.db.transaction(() => {
-      this.db.prepare("UPDATE markets SET status = 'CALLING', updated_at = ? WHERE id = ?").run(now, marketId);
-      this.db.prepare("UPDATE market_carriers SET status = 'CALLING', updated_at = ? WHERE market_id = ?").run(now, marketId);
+      this.db.prepare(`UPDATE markets SET status = 'CALLING', started_at = ?, procurement_deadline_at = ?,
+        revision = revision + 1, review_reason = NULL, updated_at = ? WHERE id = ?`).run(now, deadline, now, marketId);
+      this.db.prepare(`UPDATE market_carriers SET status = 'CALLING', evaluator_action = 'CONTINUE_DISCOVERY',
+        action_reason = 'calls_requested', action_revision = (SELECT revision FROM markets WHERE id = ?), updated_at = ?
+        WHERE market_id = ?`).run(marketId, now, marketId);
       this.db.prepare(`UPDATE orders SET lifecycle_status = CASE WHEN lifecycle_status = 'EXCEPTION' THEN lifecycle_status ELSE 'SOURCING' END,
         updated_at = ? WHERE id = ?`).run(now, market.orderId);
       this.insertEvent(market.orderId, marketId, null, "CALL_STARTED", `${carrierIds.length} carrier calls requested`, now);
@@ -166,33 +229,55 @@ export class OrderMarketService {
     const market = this.getMarket(marketId);
     if (!market) return null;
     const carrierRows = this.db.prepare(`SELECT contacts.*, market_carriers.status AS market_carrier_status
+      , market_carriers.evaluator_action, market_carriers.action_reason, market_carriers.action_payload
+      , market_carriers.action_revision, market_carriers.negotiation_rounds, market_carriers.human_reason
       FROM market_carriers JOIN contacts ON contacts.id = market_carriers.carrier_id
       WHERE market_carriers.market_id = ? ORDER BY contacts.label COLLATE NOCASE`).all(marketId) as Row[];
     const calls = this.calls.listCallsForMarket(marketId);
-    const offerRows = this.db.prepare(`SELECT offers.*, contacts.label AS carrier_label FROM offers
-      JOIN contacts ON contacts.id = offers.carrier_id WHERE offers.market_id = ?
-      ORDER BY offers.created_at DESC, offers.id DESC`).all(marketId) as Row[];
-    const offers = offerRows.map((row) => evaluateOffer(toOffer(row), market.mandate));
+    const offerRows = this.db.prepare(`SELECT procurement_offer_versions.*, contacts.label AS carrier_label
+      FROM procurement_offer_versions JOIN contacts ON contacts.id = procurement_offer_versions.carrier_id
+      WHERE procurement_offer_versions.market_id = ?
+      ORDER BY procurement_offer_versions.version DESC, procurement_offer_versions.created_at DESC`)
+      .all(marketId) as Row[];
+    const rawOffers = offerRows.map(toOffer);
     const latestByCarrier = new Map<string, OfferRecord>();
-    for (const offer of offers) if (!latestByCarrier.has(offer.carrierId)) latestByCarrier.set(offer.carrierId, offer);
-    const latestOffers = [...latestByCarrier.values()];
-    const validLatest = latestOffers.filter((offer) => offer.isValid);
-    const ranked = [...validLatest].sort((a, b) => b.score - a.score || a.price - b.price || a.createdAt.localeCompare(b.createdAt));
+    for (const offer of rawOffers) if (!latestByCarrier.has(offer.carrierId)) latestByCarrier.set(offer.carrierId, offer);
+    const evaluation = this.evaluateSnapshot(market, carrierRows, calls, latestByCarrier);
+    const evaluatedLatest = new Map(evaluation.offers.map((offer) => [offer.id, offer]));
+    const historicalEvaluation = new Map(evaluateOffers(market.mandate, rawOffers.map(toOfferFacts)).map((offer) => [offer.id, offer]));
+    const offers = rawOffers.map((offer) => decorateOffer(offer, evaluatedLatest.get(offer.id) ?? historicalEvaluation.get(offer.id)!));
+    for (const [carrierId, offer] of latestByCarrier) {
+      const decorated = offers.find((candidate) => candidate.id === offer.id);
+      if (decorated) latestByCarrier.set(carrierId, decorated);
+    }
+    const ranked = evaluation.rankedOfferIds.map((id) => offers.find((offer) => offer.id === id)!).filter(Boolean);
     const ranks = new Map(ranked.map((offer, index) => [offer.id, index + 1]));
     const activeCommitment = this.getActiveCommitment(marketId);
     const carriers: MarketCarrierState[] = carrierRows.map((row) => {
       const carrier = toContact(row);
       const latestOffer = latestByCarrier.get(carrier.id) || null;
       const latestCall = calls.find((call) => (call.carrierId || call.contactId) === carrier.id) || null;
+      const instruction = activeCommitment?.carrierId === carrier.id
+        ? { action: "AWARD" as const, reason: "active_commitment", field: null, targetPrice: null, targetArrival: null, marketRevision: market.revision }
+        : evaluation.actions[carrier.id] ?? instructionFromRow(row, market.revision);
       return {
         carrier,
-        status: derivedCarrierStatus(String(row.market_carrier_status), latestCall, latestOffer, activeCommitment?.carrierId === carrier.id),
+        status: derivedCarrierStatus(String(row.market_carrier_status), latestCall, latestOffer, instruction, activeCommitment?.carrierId === carrier.id),
         latestOffer,
         latestCall,
         rank: latestOffer ? ranks.get(latestOffer.id) || null : null,
+        instruction,
+        negotiationRounds: Number(row.negotiation_rounds || 0),
+        humanReason: nullableString(row.human_reason),
       };
     });
-    const cheapestOffer = [...validLatest].sort((a, b) => a.price - b.price || b.score - a.score)[0] || null;
+    const validLatest = [...latestByCarrier.values()].filter((offer) => offer.isComparable && offer.isValid);
+    const cheapestOffer = evaluation.cheapestOfferId
+      ? offers.find((offer) => offer.id === evaluation.cheapestOfferId) ?? null
+      : null;
+    const nearFeasibleOffers = [...latestByCarrier.values()]
+      .filter((offer) => offer.isComparable && !offer.isValid)
+      .sort((left, right) => violationDistance(left) - violationDistance(right) || (left.price ?? Infinity) - (right.price ?? Infinity));
     return {
       market,
       progress: {
@@ -204,8 +289,12 @@ export class OrderMarketService {
       },
       carriers,
       offers,
-      bestOffer: ranked[0] || null,
+      bestOffer: evaluation.bestOfferId ? offers.find((offer) => offer.id === evaluation.bestOfferId) ?? null : null,
       cheapestOffer,
+      nearFeasibleOffers,
+      phase: evaluation.phase,
+      awardReady: evaluation.awardReady,
+      reviewReason: evaluation.reviewReason,
       activeCommitment,
     };
   }
@@ -213,34 +302,255 @@ export class OrderMarketService {
   recordOffer(marketId: string, input: RecordOfferInput): MarketState {
     const market = this.getMarket(marketId);
     if (!market) throw new Error("Market not found.");
-    if (["COMMITTED", "CLOSED", "FAILED", "CANCELED"].includes(market.status)) throw new Error("Offers cannot be added to this market.");
-    const selected = this.db.prepare("SELECT 1 FROM market_carriers WHERE market_id = ? AND carrier_id = ?").get(marketId, input.carrierId);
+    return this.recordProgressiveOffer(marketId, input.carrierId, {
+      availability: "AVAILABLE",
+      price: input.price,
+      currency: market.mandate.currency,
+      rateAllIn: true,
+      pickupTime: input.pickupTime,
+      expectedArrival: input.expectedArrival,
+      firm: input.isFinalOffer ?? false,
+      carrierConditions: input.conditions?.trim() ? [input.conditions.trim()] : [],
+      accessorials: input.extraFees?.trim() ? [input.extraFees.trim()] : [],
+      confirmedRequirements: input.confirmedRequirements ?? market.mandate.conditions,
+      rejectedRequirements: input.rejectedRequirements ?? [],
+    }, input.callId ?? null, {
+      waitingTimeIncluded: input.waitingTimeIncluded,
+      requiresImmediateDecision: input.requiresImmediateDecision,
+      callbackAllowed: input.callbackAllowed,
+    });
+  }
+
+  recordProgressiveOffer(
+    marketId: string,
+    carrierId: string,
+    update: ProgressiveOfferUpdateInput,
+    callId: string | null = null,
+    legacy: Pick<RecordOfferInput, "waitingTimeIncluded" | "requiresImmediateDecision" | "callbackAllowed"> = {},
+  ): MarketState {
+    const market = this.getMarket(marketId);
+    if (!market) throw new Error("Market not found.");
+    if (["FAILED", "CANCELED"].includes(market.status)) throw new Error("Offers cannot be added to this market.");
+    const selected = this.db.prepare("SELECT * FROM market_carriers WHERE market_id = ? AND carrier_id = ?")
+      .get(marketId, carrierId) as Row | undefined;
     if (!selected) throw new Error("That carrier is not selected for this market.");
-    if (!Number.isInteger(input.price) || input.price < 0) throw new Error("Offer price must be a non-negative whole amount.");
-    const previous = this.db.prepare(`SELECT id FROM offers WHERE market_id = ? AND carrier_id = ?
-      ORDER BY created_at DESC, id DESC LIMIT 1`).get(marketId, input.carrierId) as Row | undefined;
+    if (update.price !== undefined && update.price !== null && (!Number.isInteger(update.price) || update.price < 0)) {
+      throw new Error("Offer price must be a non-negative whole amount.");
+    }
+    if (update.confidence !== undefined && update.confidence !== null && (update.confidence < 0 || update.confidence > 1)) {
+      throw new Error("Offer confidence must be between 0 and 1.");
+    }
+    if (callId) {
+      const call = this.calls.getCall(callId);
+      if (!call || call.marketId !== marketId || (call.carrierId || call.contactId) !== carrierId) {
+        throw new Error("The call is not attached to that carrier in this market.");
+      }
+    }
+    const previous = this.db.prepare(`SELECT * FROM procurement_offer_versions WHERE market_id = ? AND carrier_id = ?
+      ORDER BY version DESC LIMIT 1`).get(marketId, carrierId) as Row | undefined;
+    const prior = previous ? toOffer(previous) : null;
+    const merged = mergeOfferUpdate(prior, update, market.mandate.currency);
     const now = new Date().toISOString();
     const offerId = randomUUID();
+    const version = Number(previous?.version || 0) + 1;
+    const late = ["COMMITTED", "CLOSED"].includes(market.status);
     this.db.transaction(() => {
-      this.db.prepare(`INSERT INTO offers (
-        id, market_id, carrier_id, call_id, price, currency, pickup_time, expected_arrival,
-        waiting_time_included, extra_fees, conditions, is_final_offer, requires_immediate_decision,
-        callback_allowed, supersedes_offer_id, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-        offerId, marketId, input.carrierId, input.callId || null, input.price, market.mandate.currency,
-        nullableDate(input.pickupTime), nullableDate(input.expectedArrival), input.waitingTimeIncluded?.trim() || null,
-        input.extraFees?.trim() || null, input.conditions?.trim() || null, input.isFinalOffer ? 1 : 0,
-        input.requiresImmediateDecision ? 1 : 0, input.callbackAllowed === false ? 0 : 1,
-        previous ? String(previous.id) : null, now,
+      this.db.prepare(`INSERT INTO procurement_offer_versions (
+        id, market_id, carrier_id, call_id, version, availability, price, currency, rate_all_in,
+        pickup_time, expected_arrival, firm, expires_at, accessorials, carrier_conditions,
+        confirmed_requirements, rejected_requirements, raw_statement, confidence, human_required, human_reason,
+        supersedes_version_id, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        offerId, marketId, carrierId, callId || prior?.callId || null, version, merged.availability,
+        merged.price, merged.currency, nullableBoolean(merged.rateAllIn), merged.pickupTime,
+        merged.expectedArrival, nullableBoolean(merged.firm), merged.expiresAt,
+        JSON.stringify(merged.accessorials), JSON.stringify(merged.carrierConditions),
+        JSON.stringify(merged.confirmedRequirements), JSON.stringify(merged.rejectedRequirements), merged.rawStatement, merged.confidence,
+        merged.humanRequired ? 1 : 0, merged.humanReason, prior?.id || null, now,
       );
-      this.db.prepare("UPDATE markets SET status = 'NEGOTIATING', updated_at = ? WHERE id = ?").run(now, marketId);
-      this.db.prepare(`UPDATE orders SET lifecycle_status = CASE WHEN lifecycle_status = 'EXCEPTION' THEN lifecycle_status ELSE 'NEGOTIATING' END,
-        updated_at = ? WHERE id = ?`).run(now, market.orderId);
-      this.db.prepare("UPDATE market_carriers SET status = ?, updated_at = ? WHERE market_id = ? AND carrier_id = ?")
-        .run(input.isFinalOffer ? "FINAL" : "NEGOTIATING", now, marketId, input.carrierId);
-      this.insertEvent(market.orderId, marketId, input.callId || null, previous ? "OFFER_UPDATED" : "OFFER_RECEIVED", `Offer recorded in ${market.mandate.currency}`, now);
+
+      const evaluated = evaluateOffers(market.mandate, [{ ...toOfferFacts(merged), id: offerId, carrierId }])[0]!;
+      if (evaluated.comparable && merged.price !== null && merged.currency) {
+        const previousComparable = this.db.prepare(`SELECT id FROM offers WHERE market_id = ? AND carrier_id = ?
+          ORDER BY created_at DESC, id DESC LIMIT 1`).get(marketId, carrierId) as Row | undefined;
+        this.db.prepare(`INSERT INTO offers (
+          id, market_id, carrier_id, call_id, price, currency, pickup_time, expected_arrival,
+          waiting_time_included, extra_fees, conditions, is_final_offer, requires_immediate_decision,
+          callback_allowed, supersedes_offer_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          offerId, marketId, carrierId, callId || prior?.callId || null, merged.price, merged.currency,
+          merged.pickupTime, merged.expectedArrival, legacy.waitingTimeIncluded?.trim() || null,
+          merged.accessorials.join("; ") || null, merged.carrierConditions.join("; ") || null,
+          merged.firm ? 1 : 0, legacy.requiresImmediateDecision ? 1 : 0,
+          legacy.callbackAllowed === false ? 0 : 1, nullableString(previousComparable?.id), now,
+        );
+      }
+
+      this.db.prepare(`UPDATE markets SET status = CASE WHEN status IN ('COMMITTED', 'CLOSED') THEN status ELSE 'NEGOTIATING' END,
+        revision = revision + 1, updated_at = ? WHERE id = ?`).run(now, marketId);
+      this.db.prepare(`UPDATE orders SET lifecycle_status = CASE
+        WHEN lifecycle_status IN ('EXCEPTION', 'COMMITTED', 'IN_PROCESS', 'COMPLETED', 'ARCHIVED') THEN lifecycle_status
+        ELSE 'NEGOTIATING' END, updated_at = ? WHERE id = ?`).run(now, market.orderId);
+      const status = merged.humanRequired ? "HUMAN"
+        : merged.availability === "UNAVAILABLE" ? "UNAVAILABLE"
+          : evaluated.comparable ? "OFFER" : "PARTIAL";
+      this.db.prepare(`UPDATE market_carriers SET status = ?, availability = ?,
+        negotiation_rounds = negotiation_rounds + CASE WHEN evaluator_action = 'NEGOTIATE' THEN 1 ELSE 0 END,
+        human_reason = ?, updated_at = ? WHERE market_id = ? AND carrier_id = ?`)
+        .run(status, merged.availability, merged.humanRequired ? merged.humanReason || "Carrier interaction requires human review" : null,
+          now, marketId, carrierId);
+      this.insertEvent(market.orderId, marketId, callId || null, late ? "LATE_OFFER_RECEIVED" : previous ? "OFFER_UPDATED" : "OFFER_RECEIVED",
+        JSON.stringify({ availability: merged.availability, price: merged.price, arrival: merged.expectedArrival, version, late }), now);
     })();
+    return this.reevaluateMarket(marketId);
+  }
+
+  reevaluateMarket(marketId: string): MarketState {
+    const market = this.getMarket(marketId);
+    if (!market) throw new Error("Market not found.");
+    const carrierRows = this.db.prepare(`SELECT contacts.*, market_carriers.status AS market_carrier_status,
+      market_carriers.negotiation_rounds, market_carriers.human_reason
+      FROM market_carriers JOIN contacts ON contacts.id = market_carriers.carrier_id
+      WHERE market_carriers.market_id = ?`).all(marketId) as Row[];
+    const calls = this.calls.listCallsForMarket(marketId);
+    const latestRows = this.db.prepare(`SELECT procurement_offer_versions.* FROM procurement_offer_versions
+      JOIN (SELECT carrier_id, MAX(version) AS version FROM procurement_offer_versions WHERE market_id = ? GROUP BY carrier_id) latest
+      ON latest.carrier_id = procurement_offer_versions.carrier_id AND latest.version = procurement_offer_versions.version
+      WHERE procurement_offer_versions.market_id = ?`).all(marketId, marketId) as Row[];
+    const latest = new Map(latestRows.map((row) => {
+      const offer = toOffer(row);
+      return [offer.carrierId, offer] as const;
+    }));
+    const evaluation = this.evaluateSnapshot(market, carrierRows, calls, latest);
+    const now = new Date().toISOString();
+
+    this.db.transaction(() => {
+      const current = this.getMarket(marketId);
+      if (!current || current.revision !== evaluation.revision) return;
+      const updateCarrier = this.db.prepare(`UPDATE market_carriers SET evaluator_action = ?, action_reason = ?,
+        action_payload = ?, action_revision = ?, status = ?, released_at = CASE WHEN ? = 'RELEASE' THEN COALESCE(released_at, ?) ELSE released_at END,
+        updated_at = ? WHERE market_id = ? AND carrier_id = ?`);
+      for (const row of carrierRows) {
+        const carrierId = String(row.id);
+        const action = evaluation.actions[carrierId];
+        if (!action) continue;
+        const call = calls.find((candidate) => (candidate.carrierId || candidate.contactId) === carrierId) || null;
+        const offer = latest.get(carrierId) || null;
+        updateCarrier.run(action.action, action.reason, JSON.stringify(action), action.marketRevision,
+          workflowStatus(action, call, offer), action.action, now, now, marketId, carrierId);
+        if (call) {
+          this.db.prepare("UPDATE calls SET market_session_state = ?, updated_at = ? WHERE id = ?")
+            .run(sessionState(action.action), now, call.id);
+        }
+      }
+      const nextStatus = evaluation.phase === "HUMAN_REVIEW" ? "HUMAN_REVIEW"
+        : evaluation.phase === "FRONTIER_NEGOTIATION" ? "NEGOTIATING" : current.status;
+      this.db.prepare(`UPDATE markets SET status = CASE WHEN status IN ('COMMITTED', 'CLOSED', 'FAILED', 'CANCELED') THEN status ELSE ? END,
+        review_reason = ?, updated_at = ? WHERE id = ?`).run(nextStatus, evaluation.reviewReason, now, marketId);
+      if (evaluation.reviewReason) {
+        this.db.prepare(`UPDATE orders SET lifecycle_status = 'EXCEPTION', exception_reason = ?, updated_at = ?
+          WHERE id = ? AND lifecycle_status NOT IN ('COMMITTED', 'IN_PROCESS', 'COMPLETED', 'ARCHIVED')`)
+          .run(evaluation.reviewReason, now, market.orderId);
+      }
+    })();
+
+    if (evaluation.awardOfferId) this.awardAutomatically(marketId, evaluation.awardOfferId, evaluation.revision);
     return this.getMarketState(marketId)!;
+  }
+
+  getProcurementCallContext(callId: string): ProcurementCallContext | null {
+    const call = this.calls.getCall(callId);
+    if (!call?.marketId || !call.orderId || !(call.carrierId || call.contactId)) return null;
+    const workspace = this.getOrder(call.orderId);
+    const state = workspace?.markets.find((candidate) => candidate.market.id === call.marketId);
+    const carrierState = state?.carriers.find((candidate) => candidate.carrier.id === (call.carrierId || call.contactId));
+    if (!workspace || !state || !carrierState) return null;
+    return {
+      callId,
+      order: workspace.order,
+      market: state.market,
+      carrier: carrierState.carrier,
+      latestOffer: carrierState.latestOffer,
+      instruction: carrierState.instruction,
+      marketClosed: ["COMMITTED", "CLOSED", "FAILED", "CANCELED"].includes(state.market.status),
+    };
+  }
+
+  recordProgressiveOfferForCall(callId: string, update: ProgressiveOfferUpdateInput): MarketState {
+    const context = this.getProcurementCallContext(callId);
+    if (!context) throw new Error("Call is not attached to a procurement market.");
+    return this.recordProgressiveOffer(context.market.id, context.carrier.id, update, callId);
+  }
+
+  getInstructionForCall(callId: string): MarketInstruction | null {
+    return this.getProcurementCallContext(callId)?.instruction ?? null;
+  }
+
+  listMarketCallInstructions(marketId: string): Array<{ callId: string; instruction: MarketInstruction }> {
+    const state = this.getMarketState(marketId);
+    if (!state) return [];
+    return state.carriers.flatMap((carrier) => carrier.latestCall && isActiveCallStatus(carrier.latestCall.status)
+      ? [{ callId: carrier.latestCall.id, instruction: carrier.instruction }]
+      : []);
+  }
+
+  validateCallInstruction(callId: string, marketRevision: number, allowed: MarketInstruction["action"][]): MarketInstruction {
+    const instruction = this.getInstructionForCall(callId);
+    if (!instruction) throw new Error("Call is not attached to a procurement market.");
+    if (instruction.marketRevision !== marketRevision) throw new Error("stale_market_instruction");
+    if (!allowed.includes(instruction.action)) throw new Error(`action_not_allowed:${instruction.action}`);
+    return instruction;
+  }
+
+  markCallHumanRequired(callId: string, reason: string): MarketState | null {
+    const context = this.getProcurementCallContext(callId);
+    if (!context) return null;
+    const cleanReason = reason.trim();
+    if (!cleanReason) throw new Error("A human escalation reason is required.");
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      this.db.prepare(`UPDATE market_carriers SET status = 'HUMAN', evaluator_action = 'HUMAN_REQUIRED',
+        action_reason = 'human_authority_required', human_reason = ?, updated_at = ?
+        WHERE market_id = ? AND carrier_id = ?`).run(cleanReason, now, context.market.id, context.carrier.id);
+      this.db.prepare("UPDATE calls SET market_session_state = 'HUMAN', human_takeover = 1, human_reason = ?, updated_at = ? WHERE id = ?")
+        .run(cleanReason, now, callId);
+      this.db.prepare("UPDATE markets SET revision = revision + 1, updated_at = ? WHERE id = ?").run(now, context.market.id);
+      this.insertEvent(context.order.id, context.market.id, callId, "HUMAN_REQUIRED", cleanReason, now);
+    })();
+    return this.reevaluateMarket(context.market.id);
+  }
+
+  attachInboundCallToMarket(callId: string, reference?: string): InboundMarketAttachment {
+    const call = this.calls.getCall(callId);
+    if (!call || call.direction !== "INBOUND" || !call.contactId) return { status: "NOT_FOUND", marketId: null, candidates: [] };
+    if (call.marketId) {
+      const market = this.getMarket(call.marketId);
+      return { status: market && ["COMMITTED", "CLOSED"].includes(market.status) ? "CLOSED" : "ATTACHED", marketId: call.marketId, candidates: [] };
+    }
+    const rows = this.db.prepare(`SELECT markets.id AS market_id, markets.order_id, markets.status, orders.reference, orders.name
+      FROM market_carriers JOIN markets ON markets.id = market_carriers.market_id
+      JOIN orders ON orders.id = markets.order_id
+      WHERE market_carriers.carrier_id = ?
+      ORDER BY CASE WHEN markets.status IN ('CALLING', 'NEGOTIATING', 'OPEN', 'HUMAN_REVIEW') THEN 0 ELSE 1 END,
+        markets.updated_at DESC`).all(call.contactId) as Row[];
+    const normalized = reference ? normalizeOrderReference(reference) : null;
+    const matching = normalized
+      ? rows.filter((row) => normalizeOrderReference(String(row.reference || row.name)) === normalized)
+      : rows.filter((row) => ["CALLING", "NEGOTIATING", "OPEN", "HUMAN_REVIEW"].includes(String(row.status)));
+    const candidates = matching.map((row) => ({ marketId: String(row.market_id), orderReference: String(row.reference || row.name) }));
+    if (matching.length !== 1) return { status: matching.length > 1 ? "AMBIGUOUS" : "NOT_FOUND", marketId: null, candidates };
+    const target = matching[0]!;
+    const now = new Date().toISOString();
+    const closed = ["COMMITTED", "CLOSED"].includes(String(target.status));
+    this.db.transaction(() => {
+      this.db.prepare(`UPDATE calls SET order_id = ?, market_id = ?, carrier_id = ?, market_session_state = ?, updated_at = ? WHERE id = ?`)
+        .run(String(target.order_id), String(target.market_id), call.contactId, closed ? "COMPLETED" : "DISCOVERY", now, callId);
+      this.db.prepare("UPDATE markets SET revision = revision + 1, updated_at = ? WHERE id = ?").run(now, String(target.market_id));
+      this.insertEvent(String(target.order_id), String(target.market_id), callId, closed ? "LATE_INBOUND_CALL" : "INBOUND_CALL_ATTACHED",
+        closed ? "Carrier called after market close" : "Inbound carrier callback attached", now);
+    })();
+    if (!closed) this.reevaluateMarket(String(target.market_id));
+    return { status: closed ? "CLOSED" : "ATTACHED", marketId: String(target.market_id), candidates };
   }
 
   commitOffer(offerId: string): OrderWorkspace {
@@ -249,7 +559,10 @@ export class OrderMarketService {
     const market = this.getMarket(String(row.market_id))!;
     const state = this.getMarketState(market.id)!;
     const offer = state.offers.find((candidate) => candidate.id === offerId)!;
+    if (!offer || !offer.isComparable) throw new Error("Offer is incomplete and cannot be committed.");
     if (!offer.isValid) throw new Error(`Offer is outside mandate: ${offer.invalidReasons.join("; ")}`);
+    const latest = state.carriers.find((carrier) => carrier.carrier.id === offer.carrierId)?.latestOffer;
+    if (latest?.id !== offer.id) throw new Error("A newer carrier offer exists; reload the market before committing.");
     if (state.progress.validOffers < market.mandate.minimumValidOffers) {
       throw new Error(`At least ${market.mandate.minimumValidOffers} valid offers are required before commitment.`);
     }
@@ -373,6 +686,72 @@ export class OrderMarketService {
     return this.getOrder(orderId)!;
   }
 
+  private evaluateSnapshot(
+    market: MarketRecord,
+    carrierRows: Row[],
+    calls: ReturnType<MarketlineRepository["listCallsForMarket"]>,
+    latest: Map<string, OfferRecord>,
+  ): MarketEvaluation {
+    return evaluateMarket({
+      revision: market.revision,
+      status: market.status,
+      automaticAward: market.automaticAward && market.startedAt !== null,
+      deadlineAt: market.procurementDeadlineAt,
+      mandate: market.mandate,
+      carriers: carrierRows.map((row) => {
+        const carrierId = String(row.id);
+        const call = calls.find((candidate) => (candidate.carrierId || candidate.contactId) === carrierId) || null;
+        const offer = latest.get(carrierId) || null;
+        return {
+          carrierId,
+          callId: call?.id ?? null,
+          callActive: Boolean(call && isActiveCallStatus(call.status)),
+          callTerminal: Boolean(call && !isActiveCallStatus(call.status)),
+          negotiationRounds: Number(row.negotiation_rounds || 0),
+          humanReason: nullableString(row.human_reason),
+          offer: offer ? toOfferFacts(offer) : null,
+        };
+      }),
+    });
+  }
+
+  private awardAutomatically(marketId: string, expectedOfferId: string, expectedRevision: number): void {
+    const market = this.getMarket(marketId);
+    if (!market || market.revision !== expectedRevision || !market.automaticAward) return;
+    const state = this.getMarketState(marketId);
+    const offer = state?.offers.find((candidate) => candidate.id === expectedOfferId);
+    if (!state?.awardReady || state.bestOffer?.id !== expectedOfferId || !offer?.isComparable || !offer.isValid) return;
+    const feasibility = checkOfferFeasibility(market.mandate, toOfferFacts(offer));
+    if (!feasibility.feasible) return;
+    const persistedComparable = this.db.prepare("SELECT 1 FROM offers WHERE id = ?").get(expectedOfferId);
+    if (!persistedComparable) return;
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      const current = this.db.prepare("SELECT revision, status, automatic_award FROM markets WHERE id = ?").get(marketId) as Row | undefined;
+      if (!current || Number(current.revision) !== expectedRevision || !Boolean(current.automatic_award)
+        || ["COMMITTED", "CLOSED", "FAILED", "CANCELED"].includes(String(current.status))) return;
+      const latest = this.db.prepare(`SELECT id FROM procurement_offer_versions WHERE market_id = ? AND carrier_id = ?
+        ORDER BY version DESC LIMIT 1`).get(marketId, offer.carrierId) as Row | undefined;
+      if (String(latest?.id || "") !== expectedOfferId) return;
+      const active = this.db.prepare("SELECT 1 FROM commitments WHERE market_id = ? AND status = 'ACTIVE'").get(marketId);
+      if (active) return;
+      this.db.prepare(`INSERT INTO commitments
+        (id, order_id, market_id, offer_id, carrier_id, status, created_at)
+        VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?)`).run(randomUUID(), market.orderId, marketId, offer.id, offer.carrierId, now);
+      this.db.prepare("UPDATE markets SET status = 'COMMITTED', closed_at = ?, review_reason = NULL, updated_at = ? WHERE id = ?")
+        .run(now, now, marketId);
+      this.db.prepare("UPDATE orders SET lifecycle_status = 'COMMITTED', exception_reason = NULL, updated_at = ? WHERE id = ?")
+        .run(now, market.orderId);
+      this.db.prepare(`UPDATE market_carriers SET status = CASE WHEN carrier_id = ? THEN 'AWARDED' ELSE 'RELEASED' END,
+        evaluator_action = CASE WHEN carrier_id = ? THEN 'AWARD' ELSE 'RELEASE' END,
+        action_reason = CASE WHEN carrier_id = ? THEN 'best_current_feasible_offer' ELSE 'market_awarded_to_better_offer' END,
+        action_revision = ?, updated_at = ? WHERE market_id = ?`)
+        .run(offer.carrierId, offer.carrierId, offer.carrierId, expectedRevision, now, marketId);
+      this.insertEvent(market.orderId, marketId, offer.callId, "OFFER_AUTO_AWARDED",
+        JSON.stringify({ offerId: offer.id, carrierId: offer.carrierId, marketRevision: expectedRevision }), now);
+    })();
+  }
+
   private toOrder(row: Row): OrderRecord {
     const orderId = String(row.id);
     const conditions = (this.db.prepare("SELECT condition_text FROM order_conditions WHERE order_id = ? ORDER BY position").all(orderId) as Row[])
@@ -483,48 +862,145 @@ function toMarket(row: Row): MarketRecord {
     status: String(row.status) as MarketRecord["status"], reason: String(row.reason),
     mandate: JSON.parse(String(row.mandate_snapshot)) as MandateSnapshot,
     createdAt: String(row.created_at), updatedAt: String(row.updated_at), closedAt: nullableString(row.closed_at),
+    revision: Number(row.revision || 0), startedAt: nullableString(row.started_at),
+    procurementDeadlineAt: nullableString(row.procurement_deadline_at), automaticAward: Boolean(row.automatic_award),
+    reviewReason: nullableString(row.review_reason),
   };
 }
 
 function toOffer(row: Row): OfferRecord {
   return {
-    id: String(row.id), marketId: String(row.market_id), carrierId: String(row.carrier_id), carrierLabel: String(row.carrier_label),
-    callId: nullableString(row.call_id), price: Number(row.price), currency: String(row.currency),
+    id: String(row.id), marketId: String(row.market_id || ""), carrierId: String(row.carrier_id || ""),
+    carrierLabel: nullableString(row.carrier_label) || "", callId: nullableString(row.call_id),
+    version: Number(row.version || 0), availability: String(row.availability || "UNKNOWN") as OfferAvailability,
+    price: nullableNumber(row.price), currency: nullableString(row.currency), rateAllIn: nullableBooleanFromRow(row.rate_all_in),
     pickupTime: nullableString(row.pickup_time), expectedArrival: nullableString(row.expected_arrival),
-    waitingTimeIncluded: nullableString(row.waiting_time_included), extraFees: nullableString(row.extra_fees),
-    conditions: nullableString(row.conditions), isFinalOffer: Boolean(row.is_final_offer),
-    requiresImmediateDecision: Boolean(row.requires_immediate_decision), callbackAllowed: Boolean(row.callback_allowed),
-    supersedesOfferId: nullableString(row.supersedes_offer_id), createdAt: String(row.created_at),
-    isValid: true, invalidReasons: [], score: 0,
+    firm: nullableBooleanFromRow(row.firm), expiresAt: nullableString(row.expires_at),
+    accessorials: jsonStringArray(row.accessorials), carrierConditions: jsonStringArray(row.carrier_conditions),
+    confirmedRequirements: jsonStringArray(row.confirmed_requirements), rawStatement: nullableString(row.raw_statement),
+    rejectedRequirements: jsonStringArray(row.rejected_requirements),
+    confidence: nullableNumber(row.confidence), humanRequired: Boolean(row.human_required), humanReason: nullableString(row.human_reason),
+    waitingTimeIncluded: null, extraFees: null, conditions: null, isFinalOffer: Boolean(row.firm),
+    requiresImmediateDecision: false, callbackAllowed: true,
+    supersedesOfferId: nullableString(row.supersedes_version_id), createdAt: String(row.created_at),
+    isComparable: false, isValid: true, invalidReasons: [], feasibilityViolations: [], missingFields: ["availability"],
+    classification: "PARTIAL", isDominated: false, isFrontier: false, score: 0,
   };
 }
 
-function evaluateOffer(offer: OfferRecord, mandate: MandateSnapshot): OfferRecord {
-  const invalidReasons: string[] = [];
-  if (offer.price > mandate.maximumPrice) invalidReasons.push(`Price exceeds maximum ${mandate.maximumPrice}`);
-  if (offer.expectedArrival && mandate.mustArriveBy && Date.parse(offer.expectedArrival) > Date.parse(mandate.mustArriveBy)) {
-    invalidReasons.push("Arrival is after the mandate deadline");
-  }
-  const priceRange = Math.max(1, mandate.maximumPrice - mandate.targetPrice);
-  const priceScore = offer.price <= mandate.targetPrice ? 100 : Math.max(0, 100 * (mandate.maximumPrice - offer.price) / priceRange);
-  let speedScore = 50;
-  if (offer.expectedArrival && mandate.preferredArrival) {
-    const arrival = Date.parse(offer.expectedArrival);
-    const preferred = Date.parse(mandate.preferredArrival);
-    const latest = mandate.mustArriveBy ? Date.parse(mandate.mustArriveBy) : preferred + 24 * 60 * 60 * 1000;
-    speedScore = arrival <= preferred ? 100 : Math.max(0, 100 * (latest - arrival) / Math.max(1, latest - preferred));
-  }
-  return { ...offer, isValid: invalidReasons.length === 0, invalidReasons, score: Math.round((mandate.priceWeight * priceScore + mandate.speedWeight * speedScore) * 10) / 10 };
+function toOfferFacts(offer: Pick<OfferRecord,
+  "id" | "carrierId" | "availability" | "price" | "currency" | "rateAllIn" | "expectedArrival"
+  | "confirmedRequirements" | "rejectedRequirements" | "humanRequired"
+>): ProcurementOfferFacts {
+  return {
+    id: offer.id,
+    carrierId: offer.carrierId,
+    availability: offer.availability,
+    price: offer.price,
+    currency: offer.currency,
+    rateAllIn: offer.rateAllIn,
+    expectedArrival: offer.expectedArrival,
+    confirmedRequirements: offer.confirmedRequirements,
+    rejectedRequirements: offer.rejectedRequirements,
+    humanRequired: offer.humanRequired,
+  };
 }
 
-function derivedCarrierStatus(persisted: string, call: ReturnType<MarketlineRepository["getCall"]>, offer: OfferRecord | null, committed: boolean): MarketCarrierState["status"] {
-  if (committed || offer?.isFinalOffer) return "FINAL";
-  if (offer) return "NEGOTIATING";
-  if (call?.status === "IN_PROGRESS") return "CONNECTED";
+function decorateOffer(offer: OfferRecord, evaluated: EvaluatedProcurementOffer): OfferRecord {
+  return {
+    ...offer,
+    isComparable: evaluated.comparable,
+    isValid: evaluated.feasible,
+    invalidReasons: evaluated.violations.map((violation) => violation.message),
+    feasibilityViolations: evaluated.violations,
+    missingFields: evaluated.missingFields,
+    classification: evaluated.classification,
+    isDominated: evaluated.dominated,
+    isFrontier: evaluated.frontier,
+    score: evaluated.score,
+  };
+}
+
+function mergeOfferUpdate(prior: OfferRecord | null, update: ProgressiveOfferUpdateInput, defaultCurrency: string): OfferRecord {
+  return {
+    ...(prior ?? {
+      id: "", marketId: "", carrierId: "", carrierLabel: "", callId: null, version: 0,
+      availability: "UNKNOWN" as const, price: null, currency: defaultCurrency, rateAllIn: null,
+      pickupTime: null, expectedArrival: null, firm: null, expiresAt: null, accessorials: [], carrierConditions: [],
+      confirmedRequirements: [], rawStatement: null, confidence: null, humanRequired: false, humanReason: null,
+      rejectedRequirements: [],
+      waitingTimeIncluded: null, extraFees: null, conditions: null, isFinalOffer: false,
+      requiresImmediateDecision: false, callbackAllowed: true, supersedesOfferId: null, createdAt: "",
+      isComparable: false, isValid: true, invalidReasons: [], feasibilityViolations: [], missingFields: ["availability" as const],
+      classification: "PARTIAL" as const, isDominated: false, isFrontier: false, score: 0,
+    }),
+    availability: update.availability ?? prior?.availability ?? "UNKNOWN",
+    price: update.price !== undefined ? update.price : prior?.price ?? null,
+    currency: update.currency !== undefined ? update.currency?.toUpperCase() || null : prior?.currency ?? defaultCurrency,
+    rateAllIn: update.rateAllIn !== undefined ? update.rateAllIn : prior?.rateAllIn ?? null,
+    pickupTime: update.pickupTime !== undefined ? nullableDate(update.pickupTime) : prior?.pickupTime ?? null,
+    expectedArrival: update.expectedArrival !== undefined ? nullableDate(update.expectedArrival) : prior?.expectedArrival ?? null,
+    firm: update.firm !== undefined ? update.firm : prior?.firm ?? null,
+    expiresAt: update.expiresAt !== undefined ? nullableDate(update.expiresAt) : prior?.expiresAt ?? null,
+    accessorials: update.accessorials ?? prior?.accessorials ?? [],
+    carrierConditions: update.carrierConditions ?? prior?.carrierConditions ?? [],
+    confirmedRequirements: update.confirmedRequirements ?? prior?.confirmedRequirements ?? [],
+    rejectedRequirements: update.rejectedRequirements ?? prior?.rejectedRequirements ?? [],
+    rawStatement: update.rawStatement !== undefined ? update.rawStatement?.trim() || null : prior?.rawStatement ?? null,
+    confidence: update.confidence !== undefined ? update.confidence : prior?.confidence ?? null,
+    humanRequired: update.humanRequired ?? prior?.humanRequired ?? false,
+    humanReason: update.humanReason !== undefined ? update.humanReason?.trim() || null : prior?.humanReason ?? null,
+  };
+}
+
+function derivedCarrierStatus(
+  persisted: string,
+  call: ReturnType<MarketlineRepository["getCall"]>,
+  offer: OfferRecord | null,
+  instruction: MarketInstruction,
+  committed: boolean,
+): MarketCarrierState["status"] {
+  if (committed || instruction.action === "AWARD") return "AWARDED";
+  if (instruction.action === "HUMAN_REQUIRED") return "HUMAN";
+  if (!offer && call && ["FAILED", "BUSY", "NO_ANSWER", "CANCELED"].includes(call.status)) return "FAILED";
+  if (instruction.action === "RELEASE") return offer?.availability === "UNAVAILABLE" ? "UNAVAILABLE" : "RELEASED";
+  if (instruction.action === "NEGOTIATE") return "NEGOTIATING";
+  if (instruction.action === "HOLD" || instruction.action === "CONFIRM") return "WAITING";
+  if (instruction.action === "ASK_MISSING_FIELD") return "PARTIAL";
+  if (offer?.isComparable) return "OFFER";
+  if (offer) return "PARTIAL";
+  if (call?.status === "IN_PROGRESS") return "DISCOVERY";
   if (call && isActiveCallStatus(call.status)) return "CALLING";
   if (call && ["FAILED", "BUSY", "NO_ANSWER", "CANCELED"].includes(call.status)) return "FAILED";
   if (call) return "COMPLETED";
   return persisted as MarketCarrierState["status"];
+}
+
+function instructionFromRow(row: Row, revision: number): MarketInstruction {
+  if (row.action_payload) {
+    try { return JSON.parse(String(row.action_payload)) as MarketInstruction; } catch { /* fall through */ }
+  }
+  return {
+    action: String(row.evaluator_action || "CONTINUE_DISCOVERY") as MarketInstruction["action"],
+    reason: String(row.action_reason || "awaiting_market"), field: null, targetPrice: null,
+    targetArrival: null, marketRevision: Number(row.action_revision || revision),
+  };
+}
+
+function workflowStatus(action: MarketInstruction, call: ReturnType<MarketlineRepository["getCall"]>, offer: OfferRecord | null): MarketCarrierState["status"] {
+  return derivedCarrierStatus("SELECTED", call, offer, action, false);
+}
+
+function sessionState(action: MarketInstruction["action"]): string {
+  if (action === "HUMAN_REQUIRED") return "HUMAN";
+  if (action === "RELEASE") return "RELEASED";
+  if (action === "NEGOTIATE") return "NEGOTIATING";
+  if (action === "HOLD" || action === "CONFIRM") return "WAITING_FOR_MARKET";
+  return "DISCOVERY";
+}
+
+function violationDistance(offer: OfferRecord): number {
+  return offer.feasibilityViolations.reduce((total, violation) => total + (violation.delta === null ? 1_000_000_000 : Math.abs(violation.delta)), 0);
 }
 
 function toCommitment(row: Row): CommitmentRecord {
@@ -565,9 +1041,20 @@ function summarizeOrder(order: OrderRecord, market: MarketState | null, commitme
   return parts.join(" · ");
 }
 
-function formatMoney(value: number, currency: string): string {
+function formatMoney(value: number | null, currency: string | null): string {
+  if (value === null || !currency) return "—";
   return new Intl.NumberFormat("es-MX", { style: "currency", currency, maximumFractionDigits: 0 }).format(value);
 }
 function formatShortDate(value: string): string { return new Date(value).toLocaleString("en", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }); }
 function nullableString(value: unknown): string | null { return value === null || value === undefined ? null : String(value); }
+function nullableNumber(value: unknown): number | null { return value === null || value === undefined ? null : Number(value); }
+function nullableBoolean(value: boolean | null): number | null { return value === null ? null : value ? 1 : 0; }
+function nullableBooleanFromRow(value: unknown): boolean | null { return value === null || value === undefined ? null : Boolean(value); }
+function jsonStringArray(value: unknown): string[] {
+  if (typeof value !== "string" || !value.trim()) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch { return []; }
+}
 function nullableDate(value: string | null | undefined): string | null { return value?.trim() ? new Date(value).toISOString() : null; }

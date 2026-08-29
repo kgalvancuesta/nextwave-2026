@@ -90,10 +90,18 @@ describe("volta agent", () => {
       "record_brief_item",
       "request_human_escalation",
     ]);
+    expect(toolNames("procurement")).toEqual([
+      "finish_procurement_call",
+      "get_procurement_instruction",
+      "record_brief_item",
+      "record_procurement_update",
+      "request_human_escalation",
+    ]);
     // A quote call cannot book, and an unidentified caller cannot do commerce.
     expect(toolNames("carrier_quote")).not.toContain("propose_commitment");
     expect(toolNames("intake")).not.toContain("record_carrier_quote");
     expect(toolNames("intake")).not.toContain("propose_commitment");
+    expect(toolNames("procurement")).not.toContain("propose_commitment");
   });
 
   it("builds a realtime agent with a strict schema for the quote tool", () => {
@@ -144,6 +152,23 @@ describe("volta agent", () => {
       error: "Call is not part of a carrier market",
       escalate: true,
     });
+  });
+
+  it("treats an invalid procurement payload as retryable, not human-authority work", async () => {
+    const updateTool = toolsForKind("procurement").find((agentTool) => agentTool.name === "record_procurement_update");
+    const output = await updateTool?.invoke(
+      contextFor("procurement", async () => {
+        throw new Error("should not reach the deterministic layer");
+      }),
+      JSON.stringify({
+        availability: "AVAILABLE", price: 100, currency: "USD", rateAllIn: true,
+        pickupTime: null, expectedArrival: 12, firm: null, expiresAt: null,
+        accessorials: [], carrierConditions: [], confirmedRequirements: [], rejectedRequirements: [],
+        rawStatement: "arrival in 12 hours", confidence: 0.95, humanRequired: false, humanReason: null,
+      }),
+    );
+
+    expect(JSON.parse(String(output))).toMatchObject({ ok: false, retry: true, escalate: false });
   });
 
   it("catches a booking claim made before a commitment exists", async () => {

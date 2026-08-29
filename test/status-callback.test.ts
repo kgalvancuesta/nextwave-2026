@@ -33,4 +33,27 @@ describe("Twilio status callbacks", () => {
     expect(isActiveCallStatus("COMPLETED")).toBe(false);
     expect(isActiveCallStatus("FAILED")).toBe(false);
   });
+
+  it("persists an inbound status callback that arrives before the voice webhook", () => {
+    const repository = createTestRepository();
+
+    const call = handleStatusCallback({
+      params: {
+        CallSid: "CA_inbound_status_first",
+        CallStatus: "ringing",
+        Direction: "inbound",
+        From: "+12025550126",
+        To: "+12025550137",
+      },
+      repository,
+    });
+
+    expect(call).toMatchObject({
+      twilioCallSid: "CA_inbound_status_first",
+      direction: "INBOUND",
+      status: "RINGING",
+      fromNumber: "+12025550126",
+      toNumber: "+12025550137",
+    });
+  });
 });
