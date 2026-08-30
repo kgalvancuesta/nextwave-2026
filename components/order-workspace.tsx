@@ -3,7 +3,7 @@
 import { AlertTriangle, ArrowRight, Check, ChevronDown, ChevronUp, FileText, Minus, PhoneCall, Plus, RotateCcw, Trophy, Volume2, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { errorMessage, requestJson } from "@/lib/client-http";
-import { type AmendmentRecord, type CommitmentRecord, type MarketCarrierState, type MarketState, type OfferRecord, type OrderEventRecord, type OrderWorkspace } from "@/lib/market-types";
+import { publicOrderReference, type AmendmentRecord, type CommitmentRecord, type MarketCarrierState, type MarketState, type OfferRecord, type OrderEventRecord, type OrderWorkspace } from "@/lib/market-types";
 
 interface Props {
   workspace: OrderWorkspace;
@@ -18,6 +18,9 @@ export function OrderWorkspaceCard({ workspace, expanded, onToggle, onChanged }:
   const [error, setError] = useState<string | null>(null);
   const [offerOpen, setOfferOpen] = useState(false);
   const tone = lifecycleTone(order.lifecycleStatus);
+  // The identifier Luna speaks to carriers and they quote back, so it belongs
+  // on the row itself rather than only inside the expanded panel.
+  const reference = publicOrderReference(order);
   const priority = priorityDisplay(order.priceWeight, order.speedWeight);
   const activeCommitment = workspace.commitments.find((commitment) => commitment.status === "ACTIVE") || null;
   const latestAmendment = workspace.amendments[0] ?? null;
@@ -51,6 +54,7 @@ export function OrderWorkspaceCard({ workspace, expanded, onToggle, onChanged }:
         <span className={`icon-pill icon-pill-${toneIcon[tone].pill}`}>{toneIcon[tone].glyph}</span>
         <span className="min-w-0">
           <span className="flex items-center gap-2">
+            <span className="shrink-0 rounded bg-[var(--ice)] px-1.5 py-0.5 font-mono text-[10px] tracking-tight text-[var(--muted-text)]">{reference}</span>
             <span className="truncate text-[13.5px] font-medium">{order.name}</span>
             <span className="hidden shrink-0 items-center gap-1 text-xs text-[var(--muted-text)] sm:flex">
               <span className="max-w-[7rem] truncate">{order.origin}</span>
@@ -82,6 +86,7 @@ export function OrderWorkspaceCard({ workspace, expanded, onToggle, onChanged }:
             <section className="overflow-hidden rounded-[10px] border border-[var(--line)] bg-white">
               <p className="px-3.5 pb-2 pt-3 text-[12px] text-[var(--muted-text)]">Mandate</p>
               <div className="border-t border-[var(--line)]">
+                <MandateRow label="Reference" value={reference} />
                 <MandateRow label="Target" value={money(order.targetPrice, order.currency)} emphasis />
                 <MandateRow label="Maximum" value={money(order.maximumPrice, order.currency)} />
                 <MandateRow label="Priority" value={priority.value === "Equal priority" ? priority.sub : `${priority.value} · ${priority.sub}`} />
@@ -237,7 +242,10 @@ function CarrierRow({ carrier, canCommit, onCommit }: { carrier: MarketCarrierSt
   const needsAttention = awaitingReconfirmation
     || ["HUMAN", "FAILED", "UNAVAILABLE"].includes(carrier.status)
     || ["HUMAN_REQUIRED", "REQUEST_HUMAN_REVIEW"].includes(carrier.instruction.action);
-  return <div className="border-b border-[var(--line)] last:border-b-0">
+  // The winner is the one row that should read at a glance: soft green surface,
+  // green pill, nothing else changes.
+  const isWinner = carrier.status === "AWARDED" || carrier.instruction.action === "AWARD";
+  return <div className={`border-b border-[var(--line)] last:border-b-0 ${isWinner ? "-mx-3 rounded-[10px] bg-[#E8F7EF] px-3" : ""}`}>
     <div className={`${CARRIER_GRID} items-center py-3.5`}>
       <div className="min-w-0">
         <div className="text-[13.5px] font-medium">{carrier.carrier.label}</div>
@@ -261,12 +269,12 @@ function CarrierRow({ carrier, canCommit, onCommit }: { carrier: MarketCarrierSt
       </div>
       <div className="text-[13px] text-[var(--muted-text)]">{formatDate(offer?.expectedArrival || null, true)}</div>
       <div className="min-w-0">
-        <span className={needsAttention ? "badge-attention" : "inline-flex items-center rounded-full bg-[var(--ice)] px-2 py-0.5 text-[11.5px] capitalize text-[var(--muted-text)]"}>{statusLabel}</span>
+        <span className={needsAttention ? "badge-attention" : `inline-flex items-center rounded-full px-2 py-0.5 text-[11.5px] capitalize ${isWinner ? "bg-[#0F7A4D] text-white" : "bg-[var(--ice)] text-[var(--muted-text)]"}`}>{statusLabel}</span>
         <span className="mt-1 block text-[11.5px] leading-snug text-[var(--muted-text)]">{instructionReasonLabel(carrier.instruction)}</span>
       </div>
       <div className="flex justify-end gap-2">
-        {offer && <button onClick={() => setDetailsOpen((open) => !open)} className="rounded-lg border border-[var(--line)] px-2.5 py-1.5 text-xs font-medium">{detailsOpen ? "Hide" : "Details"}</button>}
-        {offer && canCommit && <button onClick={() => onCommit(offer)} className="rounded-lg bg-[var(--ink)] px-2.5 py-1.5 text-xs font-medium text-white">Commit</button>}
+        {offer && <button onClick={() => setDetailsOpen((open) => !open)} className="rounded-md border border-[var(--line)] bg-white px-2 py-0.5 text-[11.5px] font-medium text-[var(--muted-text)] hover:text-[var(--ink)]">{detailsOpen ? "Hide" : "Details"}</button>}
+        {offer && canCommit && <button onClick={() => onCommit(offer)} className="rounded-md bg-[var(--ink)] px-2 py-0.5 text-[11.5px] font-medium text-white">Commit</button>}
       </div>
     </div>
     {offer && detailsOpen && <div className="mb-3 rounded-[10px] bg-[var(--ice)]"><OfferDetails offer={offer} /></div>}
@@ -285,8 +293,8 @@ function EvidenceButton({ offer }: { offer: OfferRecord }) {
   const seconds = evidence.offsetMs !== null ? Math.max(0, Math.floor(evidence.offsetMs / 1000)) : null;
   if (!evidence.audioUrl && !evidence.rawStatement) return null;
   return <div className="mt-1">
-    <button type="button" onClick={() => setOpen(!open)} className="inline-flex items-center gap-1 whitespace-nowrap text-[11.5px] text-[var(--muted-text)] hover:text-[var(--ink)]">
-      <Volume2 size={12} className="shrink-0" /> Evidence{seconds !== null ? ` · ${formatOffset(seconds)}` : ""}
+    <button type="button" onClick={() => setOpen(!open)} className="inline-flex items-center gap-1 whitespace-nowrap text-[10.5px] text-[var(--muted-text)] hover:text-[var(--ink)]">
+      <Volume2 size={10} className="shrink-0" /> Evidence{seconds !== null ? ` · ${formatOffset(seconds)}` : ""}
     </button>
     {open && <div className="mt-1.5 rounded-lg border border-[var(--line)] bg-[var(--ice)] p-2">
       {evidence.rawStatement && <p className="text-[12px] italic text-[var(--ink)]">&ldquo;{evidence.rawStatement}&rdquo;</p>}

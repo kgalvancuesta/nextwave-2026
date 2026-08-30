@@ -16,7 +16,7 @@ export interface VoiceSessionAdapter {
  * Update this string to change what callers hear.
  */
 export const INBOUND_INTERIM_MESSAGE =
-  "Thank you for calling Nextwave. Our automated phone service is currently being set up. Please try again soon.";
+  "Thank you for calling Semantiks. Our automated phone service is currently being set up. Please try again soon.";
 
 export class PlaceholderVoiceSessionAdapter implements VoiceSessionAdapter {
   async handleInboundCall(context: CallContext): Promise<VoiceResponse> {
