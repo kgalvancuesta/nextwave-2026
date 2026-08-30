@@ -18,3 +18,9 @@ coverage/
 npm-debug.log*
 *.tsbuildinfo
 .DS_Store
+
+# Local agent tooling. .claude/ holds absolute-path symlinks that only resolve
+# on the machine that created them.
+.agents/
+.claude/
+skills-lock.json

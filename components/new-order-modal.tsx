@@ -155,7 +155,7 @@ export function NewOrderModal({ contacts, onClose, onCreated, onAddCarrier }: Pr
           </section>
 
           <section className="border-t border-[var(--line)] pt-7">
-            <SectionTitle number="03" title="Demurrage watch" description="Optional, but required for Nauta to quantify and resolve a free-time risk." />
+            <SectionTitle number="03" title="Demurrage watch" description="Optional, but required to quantify a free-time risk and let Volta resolve it by phone." />
             <div className="mt-4 grid gap-4 sm:grid-cols-3">
               <Field label="Free time ends" error={visibleErrors.freeTimeEndsAt}><input data-field="freeTimeEndsAt" aria-invalid={Boolean(visibleErrors.freeTimeEndsAt)} type="datetime-local" className="field-input" value={draft.freeTimeEndsAt} onChange={(e) => update("freeTimeEndsAt", e.target.value)} /></Field>
               <Field label="Current ETA"><input type="datetime-local" className="field-input" value={draft.currentEta} onChange={(e) => update("currentEta", e.target.value)} /></Field>

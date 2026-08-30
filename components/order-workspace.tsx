@@ -121,9 +121,9 @@ function DemurrageRiskPanel({ order, calls, busy, onResolve }: { order: OrderWor
   const exposure = etaOverrunDays * order.dailyDemurrageRate;
   const inProgress = order.riskStatus === "IN_PROGRESS";
   return <section className={`rounded-2xl border p-5 ${inProgress ? "border-amber-300 bg-amber-50" : "border-red-300 bg-red-50"}`}>
-    <div className="flex items-start gap-3"><span className={`mt-0.5 rounded-full p-2 ${inProgress ? "bg-amber-200 text-amber-900" : "bg-red-200 text-red-900"}`}><AlertTriangle size={18} /></span><div className="min-w-0 flex-1"><p className="eyebrow">Nauta risk watch</p><h3 className="mt-1 text-lg font-semibold">{inProgress ? "Recovery in progress" : "Demurrage exposure"}</h3><p className="mt-1 text-sm text-[var(--muted)]">Free time ends {formatDate(order.freeTimeEndsAt)} · {hoursRemaining >= 0 ? `${hoursRemaining} hours remaining` : `${Math.abs(hoursRemaining)} hours overdue`}</p></div></div>
+    <div className="flex items-start gap-3"><span className={`mt-0.5 rounded-full p-2 ${inProgress ? "bg-amber-200 text-amber-900" : "bg-red-200 text-red-900"}`}><AlertTriangle size={18} /></span><div className="min-w-0 flex-1"><p className="eyebrow">Exception watch · source: Nina</p><h3 className="mt-1 text-lg font-semibold">{inProgress ? "Recovery in progress" : "Demurrage exposure"}</h3><p className="mt-1 text-sm text-[var(--muted)]">Free time ends {formatDate(order.freeTimeEndsAt)} · {hoursRemaining >= 0 ? `${hoursRemaining} hours remaining` : `${Math.abs(hoursRemaining)} hours overdue`}</p></div></div>
     <div className="mt-4 grid grid-cols-2 gap-2"><Metric label="Potential exposure" value={money(exposure, order.currency)} sub={`${money(order.dailyDemurrageRate, order.currency)} / day`} /><Metric label="Current ETA" value={order.currentEta ? formatDate(order.currentEta, true) : "Unconfirmed"} /></div>
-    {inProgress ? <><p className="mt-4 text-sm font-medium text-amber-950">Nauta is verifying ETA, securing an appointment, and preparing an extension or fee-waiver fallback. The action is recorded in the order audit trail.</p>{calls.length > 0 && <div className="mt-4 space-y-2">{calls.map((call) => <div key={call.id} className="flex items-center justify-between rounded-lg border border-amber-200 bg-white/70 px-3 py-2 text-sm"><span className="font-semibold">{call.contactLabel || call.toNumber}</span><span className="font-mono text-[10px] uppercase tracking-wider">{displayStatus(call.status)}</span></div>)}</div>}</> : <button disabled={busy} onClick={onResolve} className="signal-button mt-4 w-full"><PhoneCall size={17} /> Nauta: call 3 carriers now</button>}
+    {inProgress ? <><p className="mt-4 text-sm font-medium text-amber-950">Volta is verifying the pickup by phone: confirming the truck, the appointment and the final rate, and preparing an extension or fee-waiver fallback. Every answer is recorded in the order audit trail.</p>{calls.length > 0 && <div className="mt-4 space-y-2">{calls.map((call) => <div key={call.id} className="flex items-center justify-between rounded-lg border border-amber-200 bg-white/70 px-3 py-2 text-sm"><span className="font-semibold">{call.contactLabel || call.toNumber}</span><span className="font-mono text-[10px] uppercase tracking-wider">{displayStatus(call.status)}</span></div>)}</div>}</> : <button disabled={busy} onClick={onResolve} className="signal-button mt-4 w-full"><PhoneCall size={17} /> Volta: verify and recover by phone</button>}
   </section>;
 }
 
@@ -173,7 +173,7 @@ function CarrierRow({ carrier, canCommit, onCommit }: { carrier: MarketCarrierSt
   const awaitingReconfirmation = !carrier.latestOffer && Boolean(carrier.retainedOffer);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const classification = offerClassificationLabel(offer);
-  return <><tr className={carrier.rank === 1 ? "best-row" : ""}><td><div className="font-semibold">{carrier.carrier.label}</div>{carrier.latestCall && <><div className="mt-0.5 font-mono text-[10px] text-[var(--muted)]">Call {displayStatus(carrier.latestCall.status)}</div>{carrier.latestCall.errorMessage && <div className="mt-1 max-w-xs text-xs text-red-700">{carrier.latestCall.errorMessage}</div>}</>}</td><td>{offer ? <><span className="font-semibold">{money(offer.price, offer.currency)}</span>{awaitingReconfirmation && <span className="ml-2 text-[10px] font-semibold uppercase text-blue-700">Prior · confirm</span>}{classification && !awaitingReconfirmation && <span className={`ml-2 text-[10px] font-semibold uppercase ${offer.classification === "INFEASIBLE" ? "text-red-700" : "text-amber-700"}`}>{classification}</span>}{offer.normalizedPrice !== null && offer.currency !== offer.normalizedCurrency && <span className="mt-0.5 block text-[10px] text-[var(--muted)]">{money(offer.normalizedPrice, offer.normalizedCurrency)} standardized</span>}{offer.missingFields.length > 0 && <span className="mt-0.5 block text-[10px] text-[var(--muted)]">Needs {offer.missingFields.map(missingFieldLabel).join(", ")}</span>}{offer.evidence && <EvidenceButton offer={offer} />}</> : "—"}</td><td>{formatDate(offer?.expectedArrival || null, true)}</td><td><span className="font-mono text-[10px] uppercase tracking-wider">{awaitingReconfirmation ? "awaiting confirmation" : displayStatus(carrier.status)}</span><span className="mt-0.5 block text-[10px] text-[var(--muted)]">{displayStatus(carrier.instruction.action)}</span></td><td>{carrier.rank ? <span className="rank-chip">{carrier.rank}</span> : "—"}</td><td className="text-right"><div className="flex justify-end gap-2">{offer && <button onClick={() => setDetailsOpen((open) => !open)} className="rounded-lg border border-[var(--line)] px-3 py-1.5 text-xs font-semibold">{detailsOpen ? "Hide" : "Details"}</button>}{offer && canCommit && <button onClick={() => onCommit(offer)} className="rounded-lg bg-[var(--ink)] px-3 py-1.5 text-xs font-semibold text-white">Commit</button>}</div></td></tr>{offer && detailsOpen && <tr><td colSpan={6} className="bg-[var(--paper)]"><OfferDetails offer={offer} /></td></tr>}</>;
+  return <><tr className={carrier.rank === 1 ? "best-row" : ""}><td><div className="font-semibold">{carrier.carrier.label}</div>{carrier.latestCall && <><div className="mt-0.5 font-mono text-[10px] text-[var(--muted)]">Call {displayStatus(carrier.latestCall.status)}</div>{carrier.latestCall.errorMessage && <div className="mt-1 max-w-xs text-xs text-red-700">{carrier.latestCall.errorMessage}</div>}</>}</td><td>{offer ? <><span className="font-semibold">{money(offer.price, offer.currency)}</span>{awaitingReconfirmation && <span className="ml-2 text-[10px] font-semibold uppercase text-blue-700">Prior · confirm</span>}{classification && !awaitingReconfirmation && <span className={`ml-2 text-[10px] font-semibold uppercase ${offer.classification === "INFEASIBLE" ? "text-red-700" : "text-amber-700"}`}>{classification}</span>}{offer.normalizedPrice !== null && offer.currency !== offer.normalizedCurrency && <span className="mt-0.5 block text-[10px] text-[var(--muted)]">{money(offer.normalizedPrice, offer.normalizedCurrency)} standardized</span>}{offer.missingFields.length > 0 && <span className="mt-0.5 block text-[10px] text-[var(--muted)]">Needs {offer.missingFields.map(missingFieldLabel).join(", ")}</span>}{offer.evidence && <EvidenceButton offer={offer} />}</> : "—"}</td><td>{formatDate(offer?.expectedArrival || null, true)}</td><td><span className="font-mono text-[10px] uppercase tracking-wider">{awaitingReconfirmation ? "awaiting confirmation" : displayStatus(carrier.status)}</span><span className="mt-0.5 block text-[10px] text-[var(--muted)]">{displayStatus(carrier.instruction.action)}</span><span className="mt-0.5 block max-w-[15rem] text-[10px] leading-snug text-[var(--muted)]">{instructionReasonLabel(carrier.instruction)}</span></td><td>{carrier.rank ? <span className="rank-chip">{carrier.rank}</span> : "—"}</td><td className="text-right"><div className="flex justify-end gap-2">{offer && <button onClick={() => setDetailsOpen((open) => !open)} className="rounded-lg border border-[var(--line)] px-3 py-1.5 text-xs font-semibold">{detailsOpen ? "Hide" : "Details"}</button>}{offer && canCommit && <button onClick={() => onCommit(offer)} className="rounded-lg bg-[var(--ink)] px-3 py-1.5 text-xs font-semibold text-white">Commit</button>}</div></td></tr>{offer && detailsOpen && <tr><td colSpan={6} className="bg-[var(--paper)]"><OfferDetails offer={offer} /></td></tr>}</>;
 }
 
 function OfferDetails({ offer }: { offer: OfferRecord }) {
@@ -260,6 +260,40 @@ function eventSummary(event: OrderEventRecord): string | null {
   }
 }
 function lifecycleTone(status: string): "yellow" | "green" | "red" | "gray" { if (["SOURCING", "NEGOTIATING"].includes(status)) return "yellow"; if (["COMMITTED", "IN_PROCESS"].includes(status)) return "green"; if (["EXCEPTION", "CANCELED"].includes(status)) return "red"; return "gray"; }
+/**
+ * The evaluator's own reason, in words a judge can read off a projector. A bare
+ * "RELEASE" does not say whether the carrier was dominated, broke a hard
+ * constraint, or simply lost the market.
+ */
+function instructionReasonLabel(instruction: MarketCarrierState["instruction"]): string {
+  const labels: Record<string, string> = {
+    awaiting_first_offer: "Waiting for their first quote",
+    call_ended_without_offer: "Call ended before they quoted",
+    carrier_unavailable: "They said they cannot cover it",
+    hard_constraint_violation: "Breaks a hard limit of the mandate",
+    pareto_dominated: "Another carrier is cheaper and faster",
+    partial_offer_call_ended: "Call ended with an incomplete quote",
+    nondominated_offer_waiting_for_market: "Still competitive - held while other lanes finish",
+    frontier_negotiation_complete: "Best terms reached - holding for the decision",
+    improve_price_on_frontier: instruction.targetPrice === null
+      ? "Countering for a better price"
+      : `Countering at ${instruction.targetPrice}`,
+    improve_arrival_on_frontier: instruction.targetArrival === null
+      ? "Countering for an earlier arrival"
+      : `Countering for arrival by ${formatDate(instruction.targetArrival, true)}`,
+    best_current_feasible_offer: "Won: best feasible offer in the market",
+    market_awarded_to_better_offer: "Released: another carrier won",
+    market_closed: "Market already closed",
+    active_commitment: "Holds the active commitment",
+    offer_requires_human: "Needs human authority",
+    human_authority_required: "Paused for a human",
+  };
+  if (instruction.reason.startsWith("missing_")) {
+    return `Asking for the ${missingFieldLabel(instruction.reason.slice("missing_".length))}`;
+  }
+  return labels[instruction.reason] || displayStatus(instruction.reason);
+}
+
 function displayStatus(status: string): string { return status.toLowerCase().replaceAll("_", " "); }
 function marketReasonLabel(reason: string): string { return reason === "AMENDMENT_REVALIDATION" ? "retained offer revalidation" : displayStatus(reason); }
 function money(value: number | null, currency: string | null): string { if (value === null || !currency) return "—"; return new Intl.NumberFormat("es-MX", { style: "currency", currency, maximumFractionDigits: 0 }).format(value); }

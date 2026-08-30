@@ -303,7 +303,7 @@ export class OrderMarketService {
     const carrierIds = this.getMarketCarrierIds(marketId);
     if (carrierIds.length < 1 || carrierIds.length > 3) throw new Error("A market must have between one and three selected carriers to start calls.");
     const now = new Date().toISOString();
-    const deadline = new Date(Date.parse(now) + 5 * 60_000).toISOString();
+    const deadline = new Date(Date.parse(now) + procurementDeadlineMs()).toISOString();
     this.db.transaction(() => {
       this.db.prepare(`UPDATE markets SET status = 'CALLING', started_at = ?, procurement_deadline_at = ?,
         revision = revision + 1, review_reason = NULL, updated_at = ? WHERE id = ?`).run(now, deadline, now, marketId);
@@ -1678,6 +1678,18 @@ function toMarket(row: Row): MarketRecord {
     procurementDeadlineAt: nullableString(row.procurement_deadline_at), automaticAward: Boolean(row.automatic_award),
     reviewReason: nullableString(row.review_reason),
   };
+}
+
+/**
+ * How long discovery may run before an unanswered lane stops holding the
+ * market. Five minutes is right for production and short for a live demo where
+ * the market is being explained while the calls are open, so it is
+ * configurable rather than hardcoded.
+ */
+function procurementDeadlineMs(): number {
+  const configured = Number(process.env.PROCUREMENT_DEADLINE_MINUTES);
+  const minutes = Number.isFinite(configured) && configured > 0 ? Math.min(configured, 120) : 5;
+  return minutes * 60_000;
 }
 
 function toOffer(row: Row): OfferRecord {
