@@ -237,8 +237,13 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
 
     // "Let me check" is conversation control, not an offer fact. Treat all
     // content-free tool calls as no-ops so they cannot create a partial offer,
-    // advance the market revision, or wake the parallel calls.
-    if (!hasMaterialProcurementUpdate(normalized)) {
+    // advance the market revision, or wake the parallel calls. The one
+    // exception is a reply to a NEGOTIATE ask: "no, that stands" carries zero
+    // commercial facts but is still the answer the round exists to collect,
+    // so it must spend the round rather than stall it forever. A genuine
+    // stall ("let me check with my dispatcher") is still a no-op either way.
+    const answeringNegotiation = before.instruction.action === "NEGOTIATE" && !pauseRequested;
+    if (!answeringNegotiation && !hasMaterialProcurementUpdate(normalized)) {
       return {
         result: {
           ok: true,

@@ -150,15 +150,21 @@ older market.
 
 ## 9. Counters are computed by the server, never invented by the model
 
-**Decision.** `negotiationInstruction` returns an explicit `targetPrice` or
-`targetArrival`. The brief says: *"NEGOTIATE means ask only for the
-evaluator-approved improvement. Never invent a counter."*
+**Decision.** `negotiationInstruction` returns an explicit `targetPrice`. The
+brief says: *"Ask once, plainly, whether they can do that exact price... Never
+invent your own number... never pressure or persuade."*
 
-**Alternative rejected.** Let the model negotiate freely within the mandate.
+**Alternative rejected.** Let the model negotiate freely within the mandate,
+and/or negotiate arrival as well as price.
 
 **Why.** A mandate bounds the outcome but not the path. A model free to pick
 its own counter can anchor badly, concede early, or reveal the ceiling by
 implication. The server knows the whole market; the model knows one call.
+Price-only, one ask, no persuasion keeps this scriptable and verifiable: a
+committed arrival time carries its own hard-constraint checks elsewhere, and
+negotiating it too would double what a single round has to track for little
+gain — the field was in the original implementation and was cut on
+restoration for that reason.
 
 `lib/procurement-evaluator.ts` (`negotiationInstruction`)
 
