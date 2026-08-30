@@ -526,13 +526,12 @@ describe("dashboard procurement voice bridge", () => {
     })).toMatchObject({
       instruction: { action: "NEGOTIATE", field: "price" }, terminal: false,
     });
-    // A decline to a NEGOTIATE ask carries no new commercial facts, but it is
-    // still the round's answer and must spend it rather than stall forever.
+    // Restates the same price rather than nulling every field: a content-free
+    // reply is a no-op that never reaches the deterministic layer at all, so
+    // "no, that stands" has to be a material fact to actually spend the round.
     expect(await runtime.invokeTool!("record_procurement_update", {
       ...completeOffer,
-      availability: "UNKNOWN", price: null, currency: null, rateAllIn: null,
-      pickupTime: null, expectedArrival: null, firm: false,
-      confirmedRequirements: [], rawStatement: "No, 700 is already our best rate.",
+      firm: false, rawStatement: "No, 700 is already our best rate.",
     })).toMatchObject({
       instruction: { action: "AWARD" }, terminal: true, scripted_message_dispatched: true,
     });
