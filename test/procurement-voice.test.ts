@@ -608,12 +608,113 @@ describe("dashboard procurement voice bridge", () => {
 
     expect(adapter.getProfile(inbound.id)).toMatchObject({ kind: "amendment" });
     expect(adapter.getProfile(inbound.id)?.instructions).toContain("Never say a requested change is accepted");
+    expect(adapter.getProfile(inbound.id)?.instructions).toContain("I found order AMEND-1. Are you calling to make a change to this commitment?");
+    expect(adapter.getProfile(inbound.id)?.instructions).not.toContain("calling on behalf of Nextwave");
     expect(adapter.proposeAmendment(inbound.id, {
       price: 1_470, currency: "USD", pickupTime: "in 40 minutes", negotiationComplete: false,
     }).result).toMatchObject({ action: "ACCEPT", commitment_updated: true });
   });
 
-  it("recaps only preformatted dashboard requirements on an amendment callback", () => {
+  it("waits for the stated reference before routing a known inbound carrier", async () => {
+    const { db, repository, markets } = createTestContext();
+    const carrier = repository.createContact({
+      label: "MexPost", phoneInput: "+525500000008", e164PhoneNumber: "+525500000008",
+    });
+    const open = markets.createOrder({
+      name: "Open procurement", client: "Nextwave", origin: "Manzanillo", destination: "Monterrey", reference: "1117",
+      currency: "MXN", targetPrice: 5_000, maximumPrice: 6_000,
+      priceWeight: 1, speedWeight: 0, minimumValidOffers: 1, desiredCarriers: 1,
+      conditions: [], carrierIds: [carrier.id],
+    });
+    markets.startMarket(open.currentMarket!.market.id);
+    const committed = markets.createOrder({
+      name: "Committed order", client: "Nextwave", origin: "Manzanillo", destination: "Guadalajara", reference: "1114",
+      currency: "MXN", targetPrice: 5_000, maximumPrice: 6_000,
+      priceWeight: 1, speedWeight: 0, minimumValidOffers: 1, desiredCarriers: 1,
+      conditions: [], carrierIds: [carrier.id],
+    });
+    const offer = markets.recordOffer(committed.currentMarket!.market.id, {
+      carrierId: carrier.id, price: 5_000, currency: "MXN", isFinalOffer: true,
+    }).bestOffer!;
+    markets.commitOffer(offer.id);
+    const runtime = new FakeAgentRuntime();
+    const service = new VoiceControlService(
+      new VoltaStore(db), runtime, telephony, recap,
+      { fromNumber: "+12025550101", sipUri: "sip:test@sip.api.openai.com", humanEscalationUri: undefined },
+      new DashboardProcurementVoiceAdapter(markets),
+    );
+
+    const webhook = await service.handleOpenAiWebhook({
+      type: "realtime.call.incoming",
+      data: { call_id: "rtc_explicit_reference", sip_headers: [{ name: "From", value: carrier.e164PhoneNumber }] },
+    });
+    expect(runtime.profile?.kind).toBe("intake");
+    expect(repository.getCall(webhook.callId!)).toMatchObject({ orderId: null, marketId: null });
+
+    expect(await runtime.invokeTool!("identify_operation", {
+      external_reference: "one one one four",
+      carrier_name: null,
+      caller_name: null,
+      origin: null,
+      destination: null,
+    })).toMatchObject({ ok: true, procurement_market_attached: true });
+    expect(runtime.rebriefs).toEqual(["amendment"]);
+    expect(runtime.profile?.instructions).toContain("I found order 1114. Are you calling to make a change to this commitment?");
+    expect(runtime.profile?.instructions).not.toContain("Can your company meet these requirements?");
+    expect(repository.getCall(webhook.callId!)).toMatchObject({
+      orderId: committed.order.id,
+      marketId: committed.currentMarket!.market.id,
+      carrierId: carrier.id,
+    });
+  });
+
+  it("starts outbound recovery calls when the committed carrier becomes unavailable", async () => {
+    const { repository, markets } = createTestContext();
+    const carriers = [
+      repository.createContact({ label: "Booked", phoneInput: "+12025550115", e164PhoneNumber: "+12025550115" }),
+      repository.createContact({ label: "Alternate", phoneInput: "+12025550116", e164PhoneNumber: "+12025550116" }),
+    ];
+    const created = markets.createOrder({
+      name: "Recovery load", client: "Nextwave", origin: "Dallas", destination: "Phoenix", reference: "REC-1",
+      currency: "USD", targetPrice: 1_400, maximumPrice: 1_500,
+      priceWeight: 1, speedWeight: 0, minimumValidOffers: 1, desiredCarriers: 2,
+      conditions: [], carrierIds: carriers.map((carrier) => carrier.id),
+    });
+    const offer = markets.recordOffer(created.currentMarket!.market.id, {
+      carrierId: carriers[0]!.id, price: 1_450, isFinalOffer: true,
+    }).bestOffer!;
+    markets.recordOffer(created.currentMarket!.market.id, {
+      carrierId: carriers[1]!.id, price: 1_475, isFinalOffer: true,
+    });
+    markets.commitOffer(offer.id);
+    const inbound = repository.upsertInboundCall({
+      twilioCallSid: "CA_recovery_voice", fromNumber: carriers[0]!.e164PhoneNumber,
+      toNumber: "+12025550101", contactId: carriers[0]!.id, status: "IN_PROGRESS", rawPayload: {},
+    });
+    markets.attachInboundCallToMarket(inbound.id, "REC-1");
+    const launched: Array<{ marketId: string; carrierIds: string[] }> = [];
+    const adapter = new DashboardProcurementVoiceAdapter(markets, () => new Date("2030-01-10T13:00:00.000Z"), {
+      async startMarket(marketId, _orderId, carrierIds) { launched.push({ marketId, carrierIds }); },
+      async notifyCarrier() {},
+    });
+
+    const outcome = adapter.proposeAmendment(inbound.id, {
+      availability: "UNAVAILABLE", negotiationComplete: false,
+    });
+    expect(outcome.followUps).toEqual([{
+      type: "START_RECOVERY_CALLS",
+      marketId: (outcome.result as { recovery_market_id: string }).recovery_market_id,
+    }]);
+    await adapter.runFollowUps(outcome.followUps ?? []);
+
+    expect(launched).toEqual([{
+      marketId: (outcome.result as { recovery_market_id: string }).recovery_market_id,
+      carrierIds: [carriers[1]!.id],
+    }]);
+    expect(markets.getMarket((outcome.result as { recovery_market_id: string }).recovery_market_id)?.status).toBe("CALLING");
+  });
+
+  it("opens an amendment callback as an inbound change request without replaying procurement", () => {
     const { repository, markets } = createTestContext();
     const carrier = repository.createContact({ label: "Booked carrier", phoneInput: "+12025550120", e164PhoneNumber: "+12025550120" });
     const created = markets.createOrder({
@@ -635,10 +736,11 @@ describe("dashboard procurement voice bridge", () => {
     markets.attachInboundCallToMarket(inbound.id, "1111");
 
     const instructions = new DashboardProcurementVoiceAdapter(markets).getProfile(inbound.id)?.instructions ?? "";
-    expect(instructions).toContain("Preferred destination arrival is August 31 at 5:55 PM CST");
-    expect(instructions).toContain("Read verbatim");
+    expect(instructions).toContain("I found order 1111. Are you calling to make a change to this commitment?");
+    expect(instructions).toContain("Do not first ask them to reconfirm");
+    expect(instructions).not.toContain("Can your company meet these requirements?");
+    expect(instructions).not.toContain("calling on behalf of Nextwave");
     expect(instructions).not.toContain("2026-08-30T20:00:00.000Z");
-    expect(instructions).not.toContain("Current commitment");
     expect(instructions).not.toContain("8 PM UTC");
   });
 });

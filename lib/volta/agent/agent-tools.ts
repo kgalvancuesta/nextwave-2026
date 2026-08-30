@@ -91,6 +91,8 @@ const procurementUpdateArgs = z.object({
 
 const procurementInstructionArgs = z.object({});
 const amendmentArgs = z.object({
+  availability: z.enum(["AVAILABLE", "UNAVAILABLE"]).nullable()
+    .describe("UNAVAILABLE when the booked carrier says it can no longer fulfill the commitment; otherwise null."),
   price: z.number().int().nonnegative().nullable(),
   currency: z.string().length(3).nullable(),
   pickupTime: z.string().nullable(),
@@ -162,7 +164,7 @@ const getProcurementInstruction = tool<typeof procurementInstructionArgs, ToolCo
 
 const proposeProcurementAmendment = tool<typeof amendmentArgs, ToolContext, string>({
   name: "propose_procurement_amendment",
-  description: "Submit a booked carrier's proposed price or pickup/delivery-time amendment for deterministic evaluation. This does not mutate the commitment unless the server returns ACCEPT.",
+  description: "Submit a booked carrier's availability, price, or pickup/delivery-time amendment for deterministic best-option evaluation. UNAVAILABLE starts recovery; no change mutates the commitment unless the server returns ACCEPT.",
   parameters: amendmentArgs,
   execute: (input, runContext) => invoke(runContext, "propose_procurement_amendment", withoutNulls(input)),
   errorFunction: procurementToolFailure,

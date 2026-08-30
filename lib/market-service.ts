@@ -118,6 +118,7 @@ export interface InboundMatchEvidence {
 }
 
 export interface AmendmentProposalInput {
+  availability?: "AVAILABLE" | "UNAVAILABLE" | null;
   price?: number | null;
   currency?: string | null;
   pickupTime?: string | null;
@@ -768,6 +769,7 @@ export class OrderMarketService {
       pickupTime: input.pickupTime !== undefined ? nullableDate(input.pickupTime) : originalTerms.pickupTime,
       expectedArrival: input.expectedArrival !== undefined ? nullableDate(input.expectedArrival) : originalTerms.expectedArrival,
     };
+    const carrierUnavailable = input.availability === "UNAVAILABLE";
     const unsupported = input.unsupportedChange?.trim() || null;
     if (unsupported) {
       const amendment = this.persistAmendment({
@@ -780,20 +782,21 @@ export class OrderMarketService {
       this.insertEvent(context.order.id, context.market.id, callId, "AMENDMENT_HUMAN_REQUIRED", unsupported, now);
       return amendmentDecisionFromRecord(amendment);
     }
-    if (sameAmendmentTerms(originalTerms, requestedTerms)) {
+    if (!carrierUnavailable && sameAmendmentTerms(originalTerms, requestedTerms)) {
       throw new Error("No price, pickup, or delivery change was provided.");
     }
 
     const revisedFacts: ProcurementOfferFacts = {
       ...toOfferFacts(committedOffer),
       id: `amendment-${existing?.id ?? callId}`,
+      availability: carrierUnavailable ? "UNAVAILABLE" : "AVAILABLE",
       price: requestedTerms.price,
       currency: requestedTerms.currency,
       pickupTime: requestedTerms.pickupTime,
       expectedArrival: requestedTerms.expectedArrival,
     };
     const revised = evaluateOffers(context.market.mandate, [revisedFacts])[0]!;
-    if ((!revised.feasible || !revised.comparable) && !input.negotiationComplete) {
+    if (!carrierUnavailable && (!revised.feasible || !revised.comparable) && !input.negotiationComplete) {
       const amendment = this.persistAmendment({
         existing, context, status: "NEGOTIATING", originalTerms, requestedTerms, finalTerms: null,
         violations: revised.violations, decisionReason: revised.comparable
@@ -831,15 +834,36 @@ export class OrderMarketService {
       return amendmentDecisionFromRecord(amendment, undefined, true);
     }
 
-    const reason = "Negotiation did not restore a complete feasible commitment; recovery is required.";
+    const reason = carrierUnavailable
+      ? "The committed carrier is no longer available; recovery is required."
+      : "Negotiation did not restore a complete feasible commitment; recovery is required.";
+    const recovery = this.getOrder(context.order.id)?.markets.find((state) =>
+      ["DRAFT", "OPEN", "CALLING", "NEGOTIATING"].includes(state.market.status)
+      && state.market.id !== context.market.id);
+    const recoveryCarrierIds = recovery ? [] : this.selectRecoveryCandidates(
+      context.order.id,
+      !carrierUnavailable,
+      context.activeCommitment.carrierId,
+    );
+    if (!recovery && recoveryCarrierIds.length === 0) {
+      const amendment = this.persistAmendment({
+        existing, context, status: "HUMAN_REQUIRED", originalTerms, requestedTerms, finalTerms: null,
+        violations: revised.violations, decisionReason: `${reason} No alternate carrier is available to contact.`, recoveryMarketId: null,
+      });
+      const now = new Date().toISOString();
+      this.db.prepare(`UPDATE orders SET lifecycle_status = 'EXCEPTION', exception_reason = ?, updated_at = ? WHERE id = ?`)
+        .run("No alternate carrier is available; human assistance is required.", now, context.order.id);
+      this.insertEvent(context.order.id, context.market.id, callId, "AMENDMENT_HUMAN_REQUIRED",
+        "No alternate carrier is available to contact.", now);
+      return amendmentDecisionFromRecord(amendment);
+    }
     let amendment = this.persistAmendment({
       existing, context, status: "RECOVERY_REQUIRED", originalTerms, requestedTerms, finalTerms: null,
       violations: revised.violations, decisionReason: reason, recoveryMarketId: null,
     });
-    const recovery = this.getOrder(context.order.id)?.markets.find((state) =>
-      ["DRAFT", "OPEN", "CALLING", "NEGOTIATING"].includes(state.market.status)
-      && state.market.id !== context.market.id);
-    const workspace = recovery ? this.getOrder(context.order.id)! : this.createRecoveryMarket(context.order.id);
+    const workspace = recovery
+      ? this.getOrder(context.order.id)!
+      : this.createRecoveryMarket(context.order.id, recoveryCarrierIds);
     const recoveryMarket = recovery?.market ?? workspace.currentMarket?.market ?? null;
     if (recoveryMarket) {
       this.db.prepare("UPDATE order_amendments SET recovery_market_id = ? WHERE id = ?").run(recoveryMarket.id, amendment.id);
@@ -1160,11 +1184,16 @@ export class OrderMarketService {
     return this.getOrder(orderId)!;
   }
 
-  private selectRecoveryCandidates(orderId: string): string[] {
+  private selectRecoveryCandidates(
+    orderId: string,
+    includeFailedFallback = true,
+    excludedCarrierId?: string,
+  ): string[] {
     const workspace = this.getOrder(orderId);
     if (!workspace) return [];
     const atRiskCommitmentId = workspace.amendments.find((amendment) => amendment.status === "RECOVERY_REQUIRED")?.commitmentId;
-    const failedCarrierId = workspace.commitments.find((commitment) => commitment.id === atRiskCommitmentId)?.carrierId
+    const failedCarrierId = excludedCarrierId
+      ?? workspace.commitments.find((commitment) => commitment.id === atRiskCommitmentId)?.carrierId
       ?? workspace.commitments.find((commitment) => commitment.status === "INVALIDATED")?.carrierId
       ?? null;
     const scores = new Map<string, number>();
@@ -1188,7 +1217,7 @@ export class OrderMarketService {
       .filter(([carrierId]) => carrierId !== failedCarrierId)
       .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
       .map(([carrierId]) => carrierId);
-    if (ranked.length === 0 && failedCarrierId) ranked.push(failedCarrierId);
+    if (ranked.length === 0 && failedCarrierId && includeFailedFallback) ranked.push(failedCarrierId);
     return ranked.slice(0, Math.max(1, Math.min(3, workspace.order.desiredCarriers)));
   }
 

@@ -276,5 +276,21 @@ export function generatedOrderReference(orderId: string): string {
 }
 
 export function normalizeOrderReference(reference: string): string {
+  const withoutLabel = reference.trim()
+    .replace(/^(?:(?:the|my|our)\s+)?(?:(?:order|reference|ref)(?:\s+(?:number|no))?|(?:order\s+)?number)(?:\s+is)?[\s:#-]*/i, "")
+    .replace(/^(?:(?:el|mi|nuestro)\s+)?(?:(?:n[uú]mero\s+de\s+)?(?:orden|referencia)|n[uú]mero\s+de\s+orden)(?:\s+es)?[\s:#-]*/i, "");
+  const tokens = withoutLabel.match(/[\p{L}\p{N}]+/gu) ?? [];
+  const digitWords: Record<string, string> = {
+    zero: "0", one: "1", two: "2", three: "3", four: "4",
+    five: "5", six: "6", seven: "7", eight: "8", nine: "9",
+    cero: "0", uno: "1", un: "1", una: "1", dos: "2", tres: "3",
+    cuatro: "4", cinco: "5", seis: "6", siete: "7", ocho: "8", nueve: "9",
+  };
+  const spokenDigits = tokens.map((token) => /^\d+$/.test(token)
+    ? token
+    : digitWords[token.toLocaleLowerCase("en-US")]);
+  if (spokenDigits.length > 0 && spokenDigits.every((digit) => digit !== undefined)) {
+    return spokenDigits.join("");
+  }
   return reference.trim().toUpperCase().replaceAll(/[^A-Z0-9]/g, "");
 }

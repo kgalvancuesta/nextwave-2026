@@ -37,7 +37,10 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
   ) {}
 
   prepareCall(callId: string): void {
-    this.markets.attachInboundCallToMarket(callId);
+    void callId;
+    // An uncorrelated inbound call must stay in intake until the caller states
+    // an order reference. Caller ID may disambiguate that explicit match, but
+    // must not silently route the call into an unrelated open procurement.
   }
 
   getProfile(callId: string): AgentCallProfile | null {
@@ -96,10 +99,12 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
         instructions: [
           "You are Luna, Nextwave's concise freight-operations voice agent.",
           "This inbound caller is the booked carrier for the matched order.",
-          "Read the server-generated dashboard order recap below verbatim. It is the only authoritative spoken recap.",
-          "Do not convert, recalculate, supplement, compare, or relabel any date or time. Do not speak raw ISO timestamps or UTC values.",
-          "After a clear yes, ask what they need to change. If no, ask only which dashboard order detail is wrong.",
-          "You may autonomously handle only price, pickup time, and delivery/arrival time changes.",
+          "This is an inbound change-request workflow. Never introduce this as an outbound call and never use an outbound procurement greeting.",
+          `Open exactly: "I found order ${reference}. Are you calling to make a change to this commitment?"`,
+          "If yes, ask what they need to change. Do not first ask them to reconfirm that they can fulfill the existing commitment.",
+          "If no, ask briefly how else you can help with this order.",
+          "You may autonomously handle availability, price, pickup time, and delivery/arrival time changes.",
+          "If the carrier says it can no longer fulfill the commitment, immediately submit availability UNAVAILABLE. Do not negotiate with an unavailable carrier.",
           "Any equipment, route, cargo, compliance, accessorial, or other material change must be submitted as unsupportedChange and handed to a human.",
           "Never say a requested change is accepted until propose_procurement_amendment returns action ACCEPT.",
           "The server is the sole authority on hard-constraint feasibility, retained-market ranking, negotiation targets, and recovery activation.",
@@ -108,7 +113,6 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
           `Order/reference: ${reference}`,
           `Carrier: ${context.carrier.label}`,
           `Shipment: ${context.order.origin} to ${context.order.destination}.`,
-          `Read verbatim: "${orderConfirmation}"`,
         ].join("\n"),
       };
     }
@@ -342,15 +346,18 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
           : undefined,
       },
       controlUpdates: [],
-      followUps: decision.action === "REVALIDATE" && decision.recoveryMarketId
-        ? [{ type: "START_REVALIDATION_CALLS", marketId: decision.recoveryMarketId }]
+      followUps: decision.recoveryMarketId && ["REVALIDATE", "RECOVER"].includes(decision.action)
+        ? [{
+            type: decision.action === "REVALIDATE" ? "START_REVALIDATION_CALLS" : "START_RECOVERY_CALLS",
+            marketId: decision.recoveryMarketId,
+          }]
         : [],
     };
   }
 
   async runFollowUps(followUps: ProcurementFollowUp[]): Promise<void> {
     for (const followUp of followUps) {
-      if (followUp.type === "START_REVALIDATION_CALLS") {
+      if (followUp.type === "START_REVALIDATION_CALLS" || followUp.type === "START_RECOVERY_CALLS") {
         const started = this.markets.startMarket(followUp.marketId);
         await this.launcher.startMarket(started.market.id, started.market.orderId, started.carrierIds);
       } else {

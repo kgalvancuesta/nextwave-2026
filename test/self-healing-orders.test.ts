@@ -37,7 +37,7 @@ function bookedMarket() {
     status: "IN_PROGRESS",
     rawPayload: {},
   });
-  expect(context.markets.attachInboundCallToMarket(inbound.id, "1842").status).toBe("CLOSED");
+  expect(context.markets.attachInboundCallToMarket(inbound.id, "one eight four two").status).toBe("CLOSED");
   return { ...context, carriers, workspace, marketId, inbound };
 }
 
@@ -103,6 +103,58 @@ describe("self-healing orders", () => {
     expect(workspace.commitments.find((commitment) => commitment.id === original.id)?.status).toBe("INVALIDATED");
     expect(workspace.markets.find((market) => market.market.id === marketId)?.market.status).toBe("FAILED");
     expect(workspace.order.lifecycleStatus).toBe("COMMITTED");
+  });
+
+  it("starts recovery when the committed carrier becomes unavailable", () => {
+    const { markets, carriers, inbound, workspace: created } = bookedMarket();
+    const original = markets.getOrder(created.order.id)!.commitments.find((commitment) => commitment.status === "ACTIVE")!;
+
+    const recovery = markets.proposeAmendmentForCall(inbound.id, {
+      availability: "UNAVAILABLE",
+      negotiationComplete: false,
+      rawStatement: "We can no longer make the commitment.",
+    });
+
+    expect(recovery).toMatchObject({
+      action: "RECOVER",
+      amendment: { status: "RECOVERY_REQUIRED" },
+    });
+    expect(recovery.amendment.violations.map((violation) => violation.code)).toContain("UNAVAILABLE");
+    const workspace = markets.getOrder(created.order.id)!;
+    expect(workspace.commitments.find((commitment) => commitment.status === "ACTIVE")?.id).toBe(original.id);
+    expect(workspace.currentMarket?.carriers.map((carrier) => carrier.carrier.id)).not.toContain(carriers[0]!.id);
+  });
+
+  it("requires human assistance when an unavailable commitment has no alternate carrier", () => {
+    const { repository, markets } = createTestContext();
+    const carrier = repository.createContact({
+      label: "Only carrier", phoneInput: "+12025550105", e164PhoneNumber: "+12025550105",
+    });
+    const created = markets.createOrder({
+      name: "Single carrier", client: "Demo", origin: "Dallas", destination: "Phoenix", reference: "1900",
+      currency: "USD", targetPrice: 1_400, maximumPrice: 1_500,
+      priceWeight: 1, speedWeight: 0, minimumValidOffers: 1, desiredCarriers: 1,
+      conditions: [], carrierIds: [carrier.id],
+    });
+    const offer = markets.recordOffer(created.currentMarket!.market.id, {
+      carrierId: carrier.id, price: 1_450, isFinalOffer: true,
+    }).bestOffer!;
+    markets.commitOffer(offer.id);
+    const inbound = repository.upsertInboundCall({
+      twilioCallSid: "CA_no_recovery_candidate", fromNumber: carrier.e164PhoneNumber,
+      toNumber: "+12025550101", contactId: carrier.id, status: "IN_PROGRESS", rawPayload: {},
+    });
+    expect(markets.attachInboundCallToMarket(inbound.id, "1900").status).toBe("CLOSED");
+
+    const decision = markets.proposeAmendmentForCall(inbound.id, {
+      availability: "UNAVAILABLE", negotiationComplete: false,
+    });
+
+    expect(decision).toMatchObject({ action: "HUMAN_HANDOFF", amendment: { status: "HUMAN_REQUIRED" } });
+    expect(markets.getOrder(created.order.id)?.order).toMatchObject({
+      lifecycleStatus: "EXCEPTION",
+      exceptionReason: "No alternate carrier is available; human assistance is required.",
+    });
   });
 
   it("revalidates only better retained offers and switches atomically when one is reconfirmed", () => {

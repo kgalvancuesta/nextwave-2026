@@ -23,9 +23,9 @@ export const REALTIME_INPUT_AUDIO_CONFIG = {
     languages: ["en", "es"],
     keywords: [
       "MXN", "pesos", "pickup", "recoleccion", "arrival", "delivery",
-      "entrega", "all-in", "todo incluido",
+      "entrega", "all-in", "todo incluido", "order", "reference", "orden", "referencia",
     ],
-    prompt: "Ground-transport carrier quote. Preserve every price, currency, date, clock time, AM/PM marker, and pickup-versus-delivery term exactly.",
+    prompt: "Ground-transport carrier call. Preserve order and reference numbers digit by digit, plus every price, currency, date, clock time, AM/PM marker, and pickup-versus-delivery term exactly.",
   },
   turnDetection: {
     // SIP call acceptance rejects custom VAD thresholds/timers. Default

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { publicOrderReference } from "@/lib/market-types";
+import { normalizeOrderReference, publicOrderReference } from "@/lib/market-types";
 import { VoltaStore } from "@/lib/volta/store";
 import { createTestContext } from "./helpers";
 
@@ -74,5 +74,15 @@ describe("order/reference numbers", () => {
     markets.linkVoltaRecovery(workspace.order.id, operation.id, "legacy-market-id");
 
     expect(store.findOperationByReference("ship 77")?.id).toBe(operation.id);
+  });
+
+  it("matches spoken digit sequences to stored numeric references", () => {
+    expect(normalizeOrderReference("one one one seven")).toBe("1117");
+    expect(normalizeOrderReference("Order number is one one one seven")).toBe("1117");
+    expect(normalizeOrderReference("uno uno uno siete")).toBe("1117");
+  });
+
+  it("preserves existing alphanumeric reference behavior", () => {
+    expect(normalizeOrderReference("ORD-1845-AD19")).toBe("ORD1845AD19");
   });
 });

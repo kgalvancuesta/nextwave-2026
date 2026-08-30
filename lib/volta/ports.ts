@@ -86,6 +86,7 @@ export interface ProcurementTurnEvidence {
 
 export type ProcurementFollowUp =
   | { type: "START_REVALIDATION_CALLS"; marketId: string }
+  | { type: "START_RECOVERY_CALLS"; marketId: string }
   | {
       type: "NOTIFY_DISPLACED_CARRIER";
       contactId: string;
