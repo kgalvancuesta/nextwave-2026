@@ -45,6 +45,7 @@ function completeOffer(price: number, arrival: string) {
   return {
     availability: "AVAILABLE" as const,
     price, currency: "USD", rateAllIn: true, expectedArrival: arrival,
+    firm: true,
     confirmedRequirements: [], confidence: 0.98,
   };
 }

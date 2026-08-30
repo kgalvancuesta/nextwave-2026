@@ -14,6 +14,10 @@ export class FakeAgentRuntime implements RealtimeAgentGateway {
   responsesRequested = 0;
   sessionsClosed = 0;
   readonly transfers: Array<{ realtimeCallId: string; targetUri: string }> = [];
+  readonly toolInvokers = new Map<string, AgentToolInvoker>();
+  readonly responsesRequestedByCall = new Map<string, number>();
+  readonly injectedByCall = new Map<string, string[]>();
+  private readonly auditByCall = new Map<string, (type: string, payload: unknown) => void>();
 
   async verifyWebhook(): Promise<unknown> {
     throw new Error("unused");
@@ -28,10 +32,18 @@ export class FakeAgentRuntime implements RealtimeAgentGateway {
   }): Promise<AgentCallSession> {
     this.profile = input.profile;
     this.invokeTool = input.invokeTool;
+    this.toolInvokers.set(input.callId, input.invokeTool);
+    this.auditByCall.set(input.callId, input.onAudit);
     return {
       useProfile: async (next) => { this.profile = next; this.rebriefs.push(next.kind); },
-      injectContext: (text) => { this.injected.push(text); },
-      requestResponse: () => { this.responsesRequested += 1; },
+      injectContext: (text) => {
+        this.injected.push(text);
+        this.injectedByCall.set(input.callId, [...(this.injectedByCall.get(input.callId) ?? []), text]);
+      },
+      requestResponse: () => {
+        this.responsesRequested += 1;
+        this.responsesRequestedByCall.set(input.callId, (this.responsesRequestedByCall.get(input.callId) ?? 0) + 1);
+      },
       close: () => { this.sessionsClosed += 1; },
     };
   }
@@ -41,4 +53,19 @@ export class FakeAgentRuntime implements RealtimeAgentGateway {
   }
 
   async hangup(): Promise<void> {}
+
+  emitCarrierTranscript(transcript: string, itemId = "item_test"): void {
+    const latest = [...this.auditByCall.values()].at(-1);
+    latest?.("transcript.turn", { itemId, transcript });
+  }
+
+  emitCarrierTranscriptFor(callId: string, transcript: string, itemId = "item_test"): void {
+    this.auditByCall.get(callId)?.("transcript.turn", { itemId, transcript });
+  }
+
+  async invokeFor(callId: string, name: string, args: unknown): Promise<unknown> {
+    const invoke = this.toolInvokers.get(callId);
+    if (!invoke) throw new Error(`No tool invoker for ${callId}`);
+    return invoke(name, args);
+  }
 }

@@ -75,6 +75,13 @@ export interface ProcurementControlUpdate {
   callId: string;
   instruction: string;
   closingMessage?: string;
+  /** Wake the agent only for a real action transition, never for revision churn. */
+  requestResponse?: boolean;
+}
+
+export interface ProcurementTurnEvidence {
+  itemId: string | null;
+  transcript: string;
 }
 
 export type ProcurementFollowUp =
@@ -103,7 +110,7 @@ export interface ProcurementVoicePort {
     origin?: string | null;
     destination?: string | null;
   }): { attached: boolean; result: unknown };
-  recordUpdate(callId: string, input: unknown): ProcurementToolOutcome;
+  recordUpdate(callId: string, input: unknown, evidence?: ProcurementTurnEvidence | null): ProcurementToolOutcome;
   proposeAmendment(callId: string, input: unknown): ProcurementToolOutcome;
   runFollowUps(followUps: ProcurementFollowUp[]): Promise<void>;
   getInstruction(callId: string): unknown;

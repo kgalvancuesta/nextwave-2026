@@ -423,7 +423,10 @@ export class OrderMarketService {
       rateAllIn: true,
       pickupTime: input.pickupTime,
       expectedArrival: input.expectedArrival,
-      firm: input.isFinalOffer ?? false,
+      // A quote entered through the typed HTTP API is already an operator-
+      // confirmed record. Voice updates use the progressive path and must earn
+      // firm=true through the explicit recap-confirmation state.
+      firm: input.isFinalOffer ?? true,
       carrierConditions: input.conditions?.trim() ? [input.conditions.trim()] : [],
       accessorials: input.extraFees?.trim() ? [input.extraFees.trim()] : [],
       confirmedRequirements: input.confirmedRequirements ?? market.mandate.conditions,
@@ -1717,7 +1720,7 @@ function toOffer(row: Row): OfferRecord {
 
 function toOfferFacts(offer: Pick<OfferRecord,
   "id" | "carrierId" | "availability" | "price" | "currency" | "rateAllIn" | "pickupTime" | "expectedArrival"
-  | "confirmedRequirements" | "rejectedRequirements" | "humanRequired"
+  | "firm" | "confirmedRequirements" | "rejectedRequirements" | "humanRequired"
 >): ProcurementOfferFacts {
   return {
     id: offer.id,
@@ -1728,6 +1731,7 @@ function toOfferFacts(offer: Pick<OfferRecord,
     rateAllIn: offer.rateAllIn,
     pickupTime: offer.pickupTime,
     expectedArrival: offer.expectedArrival,
+    firm: offer.firm,
     confirmedRequirements: offer.confirmedRequirements,
     rejectedRequirements: offer.rejectedRequirements,
     humanRequired: offer.humanRequired,

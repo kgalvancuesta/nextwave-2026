@@ -34,6 +34,7 @@ function offer(id: string, carrierId: string, price: number | null, arrival: str
     rateAllIn: price === null ? null : true,
     pickupTime: null,
     expectedArrival: arrival,
+    firm: true,
     confirmedRequirements: ["Tolls included"],
     rejectedRequirements: [],
     humanRequired: false,
@@ -56,6 +57,26 @@ describe("deterministic procurement evaluator", () => {
     expect(result.violations.find((violation) => violation.code === "MAXIMUM_PRICE")?.actual).toBe(1173.52);
     expect(result.violations.find((violation) => violation.code === "MAXIMUM_PRICE")?.delta).toBe(273.52);
     expect(result.violations.find((violation) => violation.code === "MANDATORY_ARRIVAL")?.delta).toBe(30 * 60_000);
+  });
+
+  it("does not release or rank a complete-looking draft before recap confirmation", () => {
+    const draft = { ...offer("draft", "carrier-a", 700, "2030-01-10T18:30:00.000Z"), firm: false };
+    const result = evaluateMarket({
+      revision: 7,
+      status: "NEGOTIATING",
+      automaticAward: true,
+      deadlineAt: null,
+      mandate,
+      carriers: [{
+        carrierId: "carrier-a", callId: "call-a", callActive: true, callTerminal: false,
+        negotiationRounds: 0, humanReason: null, offer: draft,
+      }],
+    });
+
+    expect(result.offers[0]).toMatchObject({ comparable: false, feasible: false });
+    expect(result.actions["carrier-a"]).toMatchObject({ action: "CONFIRM", reason: "confirm_complete_offer" });
+    expect(result.rankedOfferIds).toEqual([]);
+    expect(result.awardReady).toBe(false);
   });
 
   it("prunes only strictly dominated comparable offers and never treats unknown as bad", () => {

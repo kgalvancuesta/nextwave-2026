@@ -167,7 +167,7 @@ const proposeProcurementAmendment = tool<typeof amendmentArgs, ToolContext, stri
 
 const finishProcurementCall = tool<typeof finishProcurementArgs, ToolContext, string>({
   name: "finish_procurement_call",
-  description: "After saying goodbye, end a released, awarded, quote-recorded, human-handoff, or voicemail procurement call. The server validates that the disposition matches the current market instruction and rejects stale revisions.",
+  description: "Request a server-owned close for a released, awarded, quote-recorded, human-handoff, or voicemail procurement call. Do not speak a farewell first: after validating the current market revision, the server plays the exact closing and hangs up only after that message. Stale or incompatible dispositions are rejected.",
   parameters: finishProcurementArgs,
   execute: (input, runContext) => invoke(runContext, "finish_procurement_call", input),
   errorFunction: procurementToolFailure,

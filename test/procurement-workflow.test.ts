@@ -31,6 +31,7 @@ function completeOffer(price: number, arrival: string) {
     currency: "USD",
     rateAllIn: true,
     expectedArrival: arrival,
+    firm: true,
     confirmedRequirements: [],
     confidence: 0.98,
   };
@@ -107,6 +108,7 @@ describe("shared procurement workflow", () => {
     markets.recordProgressiveOfferForCall(calls[1]!.id, completeOffer(850, "2030-01-10T19:00:00.000Z"));
     const state = markets.recordProgressiveOfferForCall(calls[2]!.id, {
       availability: "UNAVAILABLE", rawStatement: "No capacity", confidence: 1,
+      firm: true,
     });
 
     expect(state.market.status).toBe("HUMAN_REVIEW");

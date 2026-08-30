@@ -49,6 +49,7 @@ const incomingEventSchema = z.object({
 
 export class VoiceControlService {
   private readonly sessions = new Map<string, AgentCallSession>();
+  private readonly latestCarrierTurns = new Map<string, { itemId: string | null; transcript: string }>();
 
   constructor(
     private readonly store: StateStore,
@@ -267,7 +268,11 @@ export class VoiceControlService {
       callId: attachedCallId,
       profile,
       invokeTool: (name, args) => this.executeAgentTool(attachedCallId, name, args),
-      onAudit: (type, payload) => { this.store.appendEvent(attachedCallId, type, payload); },
+      onAudit: (type, payload) => {
+        this.store.appendEvent(attachedCallId, type, payload);
+        const evidence = carrierTurnEvidence(type, payload);
+        if (evidence) this.latestCarrierTurns.set(attachedCallId, evidence);
+      },
     });
     this.sessions.set(attachedCallId, session);
     this.store.appendEvent(attachedCallId, "realtime.call.accepted", {
@@ -298,12 +303,14 @@ export class VoiceControlService {
       await this.realtime.transfer(call.realtimeCallId, target);
       this.store.updateCall(call.id, { status: "transferred", endedAt: new Date().toISOString() });
       this.store.appendEvent(call.id, "control.transferred", { target });
+      this.releaseCallSession(call.id);
       return;
     }
 
     await this.realtime.hangup(call.realtimeCallId);
     this.store.updateCall(call.id, { status: "completed", endedAt: new Date().toISOString() });
     this.store.appendEvent(call.id, "control.hung_up", {});
+    this.releaseCallSession(call.id);
   }
 
   async completeCall(callId: string) {
@@ -331,8 +338,7 @@ export class VoiceControlService {
 
     this.store.updateCall(call.id, { status: "completed", endedAt: new Date().toISOString() });
     this.store.appendEvent(call.id, "call.completed", { recapOutcomes: outcomes });
-    this.sessions.get(call.id)?.close();
-    this.sessions.delete(call.id);
+    this.releaseCallSession(call.id);
     return outcomes;
   }
 
@@ -393,7 +399,7 @@ export class VoiceControlService {
 
     if (name === "record_procurement_update") {
       if (!this.procurement) throw new Error("Procurement workflow is not configured");
-      const outcome = this.procurement.recordUpdate(call.id, args);
+      const outcome = this.procurement.recordUpdate(call.id, args, this.latestCarrierTurns.get(call.id) ?? null);
       await this.propagateProcurementUpdates(outcome.controlUpdates);
       await this.procurement.runFollowUps(outcome.followUps ?? []);
       // Recording a fact can close the market. Deliver the persisted recap
@@ -421,12 +427,33 @@ export class VoiceControlService {
       const disposition = z.enum(["RELEASE", "COMPLETE", "HUMAN", "QUOTE_RECORDED", "VOICEMAIL"])
         .parse(args.disposition);
       const result = this.procurement.validateFinish(call.id, marketRevision, disposition);
-      if (call.realtimeCallId) await this.realtime.hangup(call.realtimeCallId);
+      const closingMessage = closingMessageFrom(result);
+      if (!call.providerCallId || !closingMessage) {
+        return {
+          ...objectResult(result),
+          ok: false,
+          terminal: false,
+          scripted_message_dispatched: false,
+          message: "The server could not prepare the audible closing. Keep the call open and retry finish_procurement_call once.",
+        };
+      }
+      try {
+        await this.telephony.playMessageAndHangup(call.providerCallId, closingMessage);
+      } catch (error) {
+        this.store.appendEvent(call.id, "procurement.finish_closing_failed", { error: errorMessage(error) });
+        return {
+          ...objectResult(result),
+          ok: false,
+          terminal: false,
+          scripted_message_dispatched: false,
+          message: "The audible closing did not dispatch. Keep the call open and retry finish_procurement_call once.",
+        };
+      }
       this.store.updateCall(call.id, { status: "completed", endedAt: new Date().toISOString() });
+      this.store.appendEvent(call.id, "procurement.finish_closing_dispatched", { marketRevision, disposition, closingMessage });
+      this.releaseCallSession(call.id);
       this.store.appendEvent(call.id, "procurement.call_finished", { marketRevision, disposition });
-      this.sessions.get(call.id)?.close();
-      this.sessions.delete(call.id);
-      return result;
+      return { ...objectResult(result), terminal: true, scripted_message_dispatched: true };
     }
 
     if (name === "request_human_escalation") {
@@ -447,6 +474,7 @@ export class VoiceControlService {
           await this.realtime.transfer(call.realtimeCallId, target);
           this.store.updateCall(call.id, { status: "transferred", endedAt: new Date().toISOString() });
           this.store.appendEvent(call.id, "escalation.transferred", { reason, target });
+          this.releaseCallSession(call.id);
           return { ok: true, escalated: true, transferred: true, marketRevision };
         } catch (error) {
           // A refer that fails mid-call is exactly when the fallback matters.
@@ -528,39 +556,44 @@ export class VoiceControlService {
   private async propagateProcurementUpdates(updates: ProcurementControlUpdate[]): Promise<void> {
     for (const update of updates) {
       if (update.closingMessage) {
-        await this.dispatchAwardClosing(update.callId, update.closingMessage);
+        await this.dispatchScriptedClosing(update.callId, update.closingMessage);
         continue;
       }
       const session = this.sessions.get(update.callId);
       if (!session) continue;
       session.injectContext(update.instruction);
-      session.requestResponse();
+      if (update.requestResponse) session.requestResponse();
       this.store.appendEvent(update.callId, "procurement.market_instruction_updated", { instruction: update.instruction });
     }
   }
 
-  private async dispatchAwardClosing(callId: string, message: string): Promise<boolean> {
+  private async dispatchScriptedClosing(callId: string, message: string): Promise<boolean> {
     const call = this.requireCall(callId);
     if (!call.providerCallId) {
-      this.store.appendEvent(call.id, "procurement.award_closing_failed", { error: "provider_call_id_missing" });
+      this.store.appendEvent(call.id, "procurement.scripted_closing_failed", { error: "provider_call_id_missing" });
       return false;
     }
     try {
       await this.telephony.playMessageAndHangup(call.providerCallId, message);
-      this.store.appendEvent(call.id, "procurement.award_closing_dispatched", { message });
-      this.sessions.get(call.id)?.close();
-      this.sessions.delete(call.id);
+      this.store.appendEvent(call.id, "procurement.scripted_closing_dispatched", { message });
+      this.releaseCallSession(call.id);
       return true;
     } catch (error) {
-      this.store.appendEvent(call.id, "procurement.award_closing_failed", { error: errorMessage(error) });
+      this.store.appendEvent(call.id, "procurement.scripted_closing_failed", { error: errorMessage(error) });
       return false;
     }
+  }
+
+  private releaseCallSession(callId: string): void {
+    this.sessions.get(callId)?.close();
+    this.sessions.delete(callId);
+    this.latestCarrierTurns.delete(callId);
   }
 
   private async handleAwardClosing(callId: string, result: unknown): Promise<unknown> {
     const closing = awardClosing(result);
     if (!closing) return result;
-    const dispatched = await this.dispatchAwardClosing(callId, closing.closingMessage);
+    const dispatched = await this.dispatchScriptedClosing(callId, closing.closingMessage);
     return {
       ...closing.result,
       scripted_message_dispatched: dispatched,
@@ -668,6 +701,28 @@ function awardClosing(value: unknown): { result: Record<string, unknown>; closin
   const result = value as Record<string, unknown>;
   if (result.terminal !== true || typeof result.closing_message !== "string" || !result.closing_message.trim()) return null;
   return { result, closingMessage: result.closing_message };
+}
+
+function objectResult(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function closingMessageFrom(value: unknown): string | null {
+  const message = objectResult(value).closing_message;
+  return typeof message === "string" && message.trim() ? message.trim() : null;
+}
+
+function carrierTurnEvidence(
+  type: string,
+  payload: unknown,
+): { itemId: string | null; transcript: string } | null {
+  if (type !== "transcript.turn" || !payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const candidate = payload as { itemId?: unknown; transcript?: unknown };
+  if (typeof candidate.transcript !== "string" || !candidate.transcript.trim()) return null;
+  return {
+    itemId: typeof candidate.itemId === "string" && candidate.itemId.trim() ? candidate.itemId : null,
+    transcript: candidate.transcript.trim(),
+  };
 }
 
 /** The market revision a procurement escalation left behind, when there is one. */

@@ -57,6 +57,9 @@ describe("dashboard procurement voice bridge", () => {
     expect(normalizeProcurementTimestamp("by two days", now)).toBe("2030-01-12T03:30:00.000Z");
     expect(normalizeProcurementTimestamp("it will take two days to get it out", now)).toBe("2030-01-12T03:30:00.000Z");
     expect(normalizeProcurementUpdate({ rawStatement: "Our all-in price is 150 USD" }, now)).toMatchObject({ rateAllIn: true });
+    expect(normalizeProcurementUpdate({ expectedArrival: "in 12 hours", rawStatement: "Arrival in 12 hours" }, now, {
+      expectedTemporalField: "expectedArrival",
+    })).toMatchObject({ expectedArrival: "2030-01-10T15:30:00.000Z" });
   });
 
   it("normalizes spoken pickup and arrival clocks without asking for reformatted confirmation", () => {
@@ -75,12 +78,40 @@ describe("dashboard procurement voice bridge", () => {
       price: 5_000,
       currency: "MXN",
       expectedArrival: null,
-      rawStatement: "I can do tomorrow at 5:00 PM for 5,000 pesos.",
-    }, now, { expectedTemporalField: "expectedArrival" })).toMatchObject({
+      rawStatement: "Our price is 5,000 pesos.",
+    }, now, {
+      expectedTemporalField: "expectedArrival",
+      authoritativeTranscript: "I can do tomorrow at 5:00 PM for 5,000 pesos.",
+      conversationItemId: "item_compound_quote",
+    })).toMatchObject({
       price: 5_000,
       currency: "MXN",
       expectedArrival: "2026-08-30T23:00:00.000Z",
+      rawStatement: "I can do tomorrow at 5:00 PM for 5,000 pesos.",
+      conversationItemId: "item_compound_quote",
     });
+
+    expect(normalizeProcurementTimestamp("5000", now)).toBeNull();
+    const corrupted = normalizeProcurementUpdate({
+      price: 5_000,
+      currency: "MXN",
+      rateAllIn: true,
+      expectedArrival: "5000",
+      rawStatement: "Our all-in price is 5000.",
+      confirmedRequirements: ["Route from Manzana to Platano"],
+    }, now, {
+      expectedTemporalField: "expectedArrival",
+      authoritativeTranscript: "Yeah, my price would be 5,000.",
+      conversationItemId: "item_price_only",
+      allowedRequirements: [],
+    });
+    expect(corrupted).toMatchObject({
+      price: 5_000,
+      rawStatement: "Yeah, my price would be 5,000.",
+      conversationItemId: "item_price_only",
+      confirmedRequirements: [],
+    });
+    expect(corrupted.expectedArrival).toBeUndefined();
   });
 
   it("briefs a dashboard market call as procurement and streams tool facts into the shared market", async () => {
@@ -99,6 +130,7 @@ describe("dashboard procurement voice bridge", () => {
     const marketId = workspace.currentMarket!.market.id;
     markets.startMarket(marketId);
     const call = repository.createOutboundBatch(carriers, "+12025550101", { orderId: workspace.order.id, marketId }).calls[0]!;
+    repository.attachTwilioSidIfMissing(call.id, "CA_procurement");
     const runtime = new FakeAgentRuntime();
     const service = new VoiceControlService(
       new VoltaStore(db), runtime, telephony, recap,
@@ -143,7 +175,7 @@ describe("dashboard procurement voice bridge", () => {
     }) as { ok: boolean; instruction: { action: string } };
     expect(partial).toMatchObject({ ok: true, comparable: false, instruction: { action: "ASK_MISSING_FIELD" } });
 
-    const result = await runtime.invokeTool!("record_procurement_update", {
+    const draft = await runtime.invokeTool!("record_procurement_update", {
       availability: "UNKNOWN",
       price: null,
       currency: null,
@@ -170,12 +202,14 @@ describe("dashboard procurement voice bridge", () => {
         rate_all_in: boolean | null;
         pickup_time: string | null;
         expected_arrival: string | null;
+        confirmed_requirements?: string[];
       };
+      missing_fields?: string[];
     };
 
-    expect(result).toMatchObject({
+    expect(draft).toMatchObject({
       ok: true,
-      comparable: true,
+      comparable: false,
       recorded_values: {
         availability: "AVAILABLE",
         price: 760,
@@ -183,9 +217,31 @@ describe("dashboard procurement voice bridge", () => {
         rate_all_in: true,
         pickup_time: null,
         expected_arrival: "2030-01-10T15:30:00.000Z",
+        confirmed_requirements: ["Tolls included"],
       },
-      instruction: { action: "HOLD" },
+      missing_fields: [],
+      instruction: { action: "CONFIRM" },
     });
+
+    const result = await runtime.invokeTool!("record_procurement_update", {
+      availability: "UNKNOWN",
+      price: null,
+      currency: null,
+      rateAllIn: null,
+      pickupTime: null,
+      expectedArrival: null,
+      firm: true,
+      expiresAt: null,
+      accessorials: [],
+      carrierConditions: [],
+      confirmedRequirements: [],
+      rejectedRequirements: [],
+      rawStatement: "Yes, that is correct.",
+      confidence: 1,
+      humanRequired: false,
+      humanReason: null,
+    }) as typeof draft;
+    expect(result).toMatchObject({ ok: true, comparable: true, instruction: { action: "HOLD" } });
     expect(markets.getMarketState(marketId)?.carriers.find((carrier) => carrier.carrier.id === carriers[0]!.id)?.latestOffer)
       .toMatchObject({
         availability: "AVAILABLE",
@@ -201,6 +257,65 @@ describe("dashboard procurement voice bridge", () => {
       marketRevision: recorded.market_revision,
       disposition: "QUOTE_RECORDED",
     })).toMatchObject({ ok: true, disposition: "QUOTE_RECORDED", instruction: { action: "HOLD" } });
+  });
+
+  it("treats a carrier pause as no-op and does not wake parallel calls for revision-only changes", async () => {
+    const { db, repository, markets } = createTestContext();
+    const carriers = [
+      repository.createContact({ label: "First", phoneInput: "+12025550111", e164PhoneNumber: "+12025550111" }),
+      repository.createContact({ label: "Second", phoneInput: "+12025550112", e164PhoneNumber: "+12025550112" }),
+    ];
+    const workspace = markets.createOrder({
+      name: "Parallel voice", client: "Nextwave", origin: "Manzana", destination: "Platano",
+      currency: "MXN", targetPrice: 8_000, maximumPrice: 10_000,
+      preferredArrival: "2030-01-10T15:00:00.000Z", mustArriveBy: "2030-01-10T18:00:00.000Z",
+      priceWeight: 0.9, speedWeight: 0.1, minimumValidOffers: 2, desiredCarriers: 2,
+      conditions: [], carrierIds: carriers.map((carrier) => carrier.id),
+    });
+    const marketId = workspace.currentMarket!.market.id;
+    markets.startMarket(marketId);
+    const calls = repository.createOutboundBatch(carriers, "+12025550101", {
+      orderId: workspace.order.id,
+      marketId,
+    }).calls;
+    const runtime = new FakeAgentRuntime();
+    const service = new VoiceControlService(
+      new VoltaStore(db), runtime, telephony, recap,
+      { fromNumber: "+12025550101", sipUri: "sip:test@sip.api.openai.com", humanEscalationUri: undefined },
+      new DashboardProcurementVoiceAdapter(markets, () => new Date("2030-01-10T03:30:00.000Z")),
+    );
+    for (const [index, call] of calls.entries()) {
+      await service.handleOpenAiWebhook({
+        type: "realtime.call.incoming",
+        data: { call_id: `rtc_parallel_${index}`, sip_headers: [{ name: "X-Internal-Call-ID", value: call.id }] },
+      });
+    }
+
+    const second = calls[1]!;
+    const revisionBeforePause = markets.getMarketState(marketId)!.market.revision;
+    runtime.emitCarrierTranscriptFor(second.id, "Let me check with my system.", "item_pause");
+    const pause = await runtime.invokeFor(second.id, "record_procurement_update", {
+      availability: "UNKNOWN", price: null, currency: null, rateAllIn: null,
+      pickupTime: null, expectedArrival: null, firm: null, expiresAt: null,
+      accessorials: [], carrierConditions: [], confirmedRequirements: [], rejectedRequirements: [],
+      rawStatement: "Carrier is checking.", confidence: null, humanRequired: false, humanReason: null,
+      conversationItemId: "invented_item",
+    });
+    expect(pause).toMatchObject({ ok: true, no_change: true, pause_requested: true });
+    expect(markets.getMarketState(marketId)!.market.revision).toBe(revisionBeforePause);
+    expect(markets.getMarketState(marketId)!.carriers.find((entry) => entry.carrier.id === carriers[1]!.id)?.latestOffer).toBeNull();
+
+    const first = calls[0]!;
+    runtime.emitCarrierTranscriptFor(first.id, "Yes.", "item_yes");
+    await runtime.invokeFor(first.id, "record_procurement_update", {
+      availability: "AVAILABLE", price: null, currency: null, rateAllIn: null,
+      pickupTime: null, expectedArrival: null, firm: null, expiresAt: null,
+      accessorials: [], carrierConditions: [], confirmedRequirements: [], rejectedRequirements: [],
+      rawStatement: "yes", confidence: 1, humanRequired: false, humanReason: null,
+      conversationItemId: "item_yes",
+    });
+    expect(runtime.responsesRequestedByCall.get(second.id)).toBe(1);
+    expect(runtime.injectedByCall.get(second.id) ?? []).toHaveLength(0);
   });
 
   it("ends voicemail cleanly instead of restarting the procurement opener", async () => {
@@ -220,9 +335,15 @@ describe("dashboard procurement voice bridge", () => {
     const call = repository.createOutboundBatch([carrier], "+12025550101", {
       orderId: workspace.order.id, marketId,
     }).calls[0]!;
+    repository.attachTwilioSidIfMissing(call.id, "CA_voicemail");
+    const scripted: Array<{ providerCallId: string; message: string }> = [];
+    const voicemailTelephony: OutboundTelephonyGateway = {
+      async dial() { return { providerCallId: "CA_unused" }; },
+      async playMessageAndHangup(providerCallId, message) { scripted.push({ providerCallId, message }); },
+    };
     const runtime = new FakeAgentRuntime();
     const service = new VoiceControlService(
-      new VoltaStore(db), runtime, telephony, recap,
+      new VoltaStore(db), runtime, voicemailTelephony, recap,
       { fromNumber: "+12025550101", sipUri: "sip:test@sip.api.openai.com", humanEscalationUri: undefined },
       new DashboardProcurementVoiceAdapter(markets),
     );
@@ -234,7 +355,11 @@ describe("dashboard procurement voice bridge", () => {
     expect(await runtime.invokeTool!("finish_procurement_call", {
       marketRevision: started.market.revision,
       disposition: "VOICEMAIL",
-    })).toMatchObject({ ok: true, disposition: "VOICEMAIL" });
+    })).toMatchObject({ ok: true, disposition: "VOICEMAIL", scripted_message_dispatched: true });
+    expect(scripted).toEqual([{
+      providerCallId: "CA_voicemail",
+      message: expect.stringContaining("Please call us back when available"),
+    }]);
     expect(runtime.sessionsClosed).toBe(1);
   });
 
@@ -271,12 +396,27 @@ describe("dashboard procurement voice bridge", () => {
     const completeOffer = {
       availability: "AVAILABLE", price: 700, currency: "USD", rateAllIn: true,
       pickupTime: "2030-01-10T14:30:00.000Z", expectedArrival: "2030-01-11T18:00:00.000Z",
-      firm: true, expiresAt: null, accessorials: [], carrierConditions: [],
-      confirmedRequirements: ["Tolls included"], rejectedRequirements: [], rawStatement: "Confirmed as read back",
+      firm: false, expiresAt: null, accessorials: [], carrierConditions: [],
+      confirmedRequirements: ["Tolls included"], rejectedRequirements: [],
+      rawStatement: "700 dollars all-in, pickup January 10 at 8:30 AM and arrival January 11 at 12 PM. Tolls included.",
       confidence: 0.99, humanRequired: false, humanReason: null,
     };
 
     expect(await runtime.invokeTool!("record_procurement_update", completeOffer)).toMatchObject({
+      instruction: { action: "CONFIRM" }, terminal: false,
+    });
+    expect(await runtime.invokeTool!("record_procurement_update", {
+      ...completeOffer,
+      availability: "UNKNOWN",
+      price: null,
+      currency: null,
+      rateAllIn: null,
+      pickupTime: null,
+      expectedArrival: null,
+      firm: true,
+      confirmedRequirements: [],
+      rawStatement: "Yes, that is correct.",
+    })).toMatchObject({
       instruction: { action: "NEGOTIATE" }, terminal: false,
     });
     markets.commitOffer(markets.getMarketState(marketId)!.bestOffer!.id);

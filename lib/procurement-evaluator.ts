@@ -18,6 +18,8 @@ export interface ProcurementOfferFacts {
   rateAllIn: boolean | null;
   pickupTime: string | null;
   expectedArrival: string | null;
+  /** True only after the carrier confirms the server-read recap. */
+  firm: boolean | null;
   confirmedRequirements: string[];
   rejectedRequirements: string[];
   humanRequired: boolean;
@@ -156,7 +158,10 @@ export function evaluateOffers(
     const missingFields = missingComparableFields(mandate, offer);
     const result = checkOfferFeasibility(mandate, offer);
     const normalized = normalizeOfferPrice(mandate, offer);
-    const comparable = offer.availability === "AVAILABLE" && missingFields.length === 0;
+    // Progressive facts remain a draft until the carrier confirms the exact
+    // server recap. Drafts can drive the next question, but they cannot enter
+    // ranking, trigger a release, or create a commitment.
+    const comparable = offer.availability === "AVAILABLE" && missingFields.length === 0 && offer.firm === true;
     return {
       ...offer,
       normalizedPrice: normalized?.amount ?? null,
@@ -218,6 +223,17 @@ export function evaluateMarket(input: MarketEvaluationInput): MarketEvaluation {
     }
     if (offer.availability === "UNAVAILABLE") {
       actions[carrier.carrierId] = instruction("RELEASE", "carrier_unavailable", input.revision);
+      continue;
+    }
+    if (offer.firm !== true) {
+      if (offer.missingFields.length === 0 && offer.availability === "AVAILABLE") {
+        actions[carrier.carrierId] = instruction("CONFIRM", "confirm_complete_offer", input.revision);
+        continue;
+      }
+      const field = offer.missingFields[0] ?? "availability";
+      actions[carrier.carrierId] = carrier.callTerminal
+        ? instruction("RELEASE", "partial_offer_call_ended", input.revision)
+        : { ...instruction("ASK_MISSING_FIELD", `missing_${field}`, input.revision), field };
       continue;
     }
     if (!offer.comparable && offer.feasible) {
@@ -368,7 +384,7 @@ function roundMoney(value: number): number {
 function isDiscoveryResolved(carrier: MarketEvaluationCarrier, offer: EvaluatedProcurementOffer | null): boolean {
   if (carrier.humanReason || carrier.callTerminal) return true;
   if (!offer) return false;
-  return offer.availability === "UNAVAILABLE" || offer.comparable || !offer.feasible;
+  return offer.availability === "UNAVAILABLE" || offer.comparable || (offer.firm === true && !offer.feasible);
 }
 
 function negotiationInstruction(

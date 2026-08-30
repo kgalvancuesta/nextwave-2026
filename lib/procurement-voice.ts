@@ -8,13 +8,19 @@ import {
 } from "./market-service";
 import { initiateOutboundBatch } from "./call-service";
 import { loadTelephonyConfig } from "./config";
-import { publicOrderReference } from "./market-types";
+import { publicOrderReference, type MarketInstruction, type OfferRecord } from "./market-types";
 import { getRepository, type MarketlineRepository } from "./repository";
 import { TwilioTelephonyProvider, type TelephonyProvider } from "./telephony";
 import { buildAwardReadback } from "./recap";
 import { flushAwardRecaps } from "./recap-service";
 import type { AgentCallProfile } from "./volta/agent/agent-context";
-import type { ProcurementControlUpdate, ProcurementFollowUp, ProcurementToolOutcome, ProcurementVoicePort } from "./volta/ports";
+import type {
+  ProcurementControlUpdate,
+  ProcurementFollowUp,
+  ProcurementToolOutcome,
+  ProcurementTurnEvidence,
+  ProcurementVoicePort,
+} from "./volta/ports";
 
 export const PROCUREMENT_TIME_ZONE = "America/Mexico_City";
 
@@ -118,7 +124,7 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
             ? `Then tell them a written confirmation with booking ID ${context.award.commitmentId} is being sent by SMS to ${context.award.recapAddress}, and to reply DISPUTE within 30 minutes if anything is wrong.`
             : `Then give them the booking ID ${context.award.commitmentId} and say the written confirmation will follow.`,
           "If the carrier disputes any term during the read-back, do not argue and do not re-negotiate: call request_human_escalation with the disputed term.",
-          "After the read-back is confirmed, say goodbye and call finish_procurement_call with disposition COMPLETE.",
+          "After the read-back is confirmed, call finish_procurement_call with disposition COMPLETE without speaking another goodbye; the server owns the audible closing.",
         ]
       : context.marketClosed
       ? [
@@ -130,8 +136,10 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
           "After each carrier turn, extract every explicit fact from that entire turn before speaking again. Send one record_procurement_update containing all facts from the turn; do not stop after the first price or date.",
           "Always pass conversationItemId: the id of the item where the carrier actually said it. It is the audio evidence for that fact. Pass null rather than a guessed id.",
           "rawStatement must be the carrier's exact words from the latest turn, not a paraphrase such as 'Carrier said' or 'Carrier confirmed'. Preserve every number, date, time, AM/PM marker, and pickup/delivery word.",
+          "The server replaces rawStatement and conversationItemId with the actual Realtime transcript. Tool fields unsupported by that transcript are discarded. Never copy a price into a time field or repeat a prior value as if it was newly spoken.",
           "Persist known facts even when another fact is ambiguous. Use null and [] for unknown fields; never omit a required tool key. If one sentence contains availability, price, time, and all-in status, persist all four together.",
           "When the carrier says the rate is all-in or todo incluido, set rateAllIn=true in that same update.",
+          "If the carrier says they need to check a system, look something up, or asks for a moment, say exactly: 'Of course—take your time. I’m here.' Then wait silently. Do not call a tool, repeat the shipment, or ask another question.",
           "# Time semantics",
           `Call clock: ${callClock.toISOString()}. Unqualified carrier times are interpreted in ${PROCUREMENT_TIME_ZONE}.`,
           "Put pickup times only in pickupTime and destination delivery/arrival times only in expectedArrival.",
@@ -141,18 +149,19 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
           "If a supplied time still returns a null recorded value, retry the tool once with the exact spoken phrase. If it remains null, ask one precise clarification for date, clock time, and AM/PM. Never ask the same time question more than twice total.",
           "# Feasibility and quote collection",
           "You state the buyer's shipment requirements. The carrier never validates whether the buyer's schedule is correct; the carrier answers whether their company can meet it.",
-          "On a clear yes to the feasibility question, immediately record availability=AVAILABLE and all listed conditions in confirmedRequirements. Do not ask availability or reconfirm those conditions again.",
+          "On a clear yes to the feasibility question, immediately record availability=AVAILABLE. Put only the exact entries under 'Required conditions' in confirmedRequirements; route facts and buyer deadlines are never confirmedRequirements. Do not ask availability again.",
           "On no, ask which requirement they cannot meet, then record availability=UNAVAILABLE or the specific rejectedRequirements. Do not restart the recap.",
           "When recapping the carrier's offer, state the recorded price, pickup, and arrival yourself and ask one yes-or-no question. A clear yes is enough; never ask the carrier to repeat a value already present in recorded_values.",
+          "Never set firm=true while collecting facts. Set firm=true only when the current server instruction is CONFIRM and the carrier clearly says yes to your exact recap. If they correct any value, record the correction with firm=false and recap once more.",
           "If record_procurement_update rejects a payload, retry it once using null or [] for unknown values. A tool payload failure is not a reason for human escalation.",
           "After a successful update, trust the complete recorded_values object. Ask one concise question for only the first field in missing_fields; never ask for a recorded field again.",
           "Before a counter, release, or concluding the call, call get_procurement_instruction and follow only the returned current market revision.",
           "# Completion",
           "HOLD means the complete quote is recorded but selection is pending. Thank the carrier, say the quote is recorded, and ask whether they prefer to hold briefly or be contacted if selected.",
           "If a carrier says only 'thank you' while on HOLD, acknowledge it and ask that hold-or-contact question. Never go silent after a polite acknowledgment.",
-          "If the carrier chooses contact later, says goodbye, or does not want to hold, say the quote is recorded but not yet selected, say goodbye, then call finish_procurement_call with disposition QUOTE_RECORDED and the current revision.",
+          "If the carrier chooses contact later, says goodbye, or does not want to hold, call finish_procurement_call with disposition QUOTE_RECORDED and the current revision. Do not say a separate goodbye; the server plays the exact closing and hangs up only after it is audible.",
           "NEGOTIATE means ask only for the evaluator-approved price or arrival improvement. Never invent a counter.",
-          "RELEASE means thank the carrier, explain that Nextwave will not proceed now, say goodbye, then call finish_procurement_call.",
+          "RELEASE means call finish_procurement_call with disposition RELEASE. Do not say a separate goodbye; the server owns the audible closing and hang-up.",
           "AWARD means the deterministic server has committed this carrier, queued the written recap, and will replace this conversation with the exact scripted closing_message. Do not ask another question or alter any term.",
         ];
 
@@ -172,10 +181,10 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
         `Current server instruction: ${JSON.stringify(context.instruction)}`,
         ...latePolicy,
         `Open naturally and immediately by reading this requirement summary verbatim, then wait for a clear yes or no about carrier feasibility: "${orderConfirmation}"`,
-        "If the carrier says yes, record availability and confirmed requirements first, then ask once for every still-missing quote fact: all-in price, pickup time if required, and destination arrival time if required. Do not ask them to restate the requirement summary.",
-        `If this is clearly voicemail, wait for the greeting or tone, then leave only: "Hi, this is Luna calling on behalf of Nextwave about order ${reference}. Please call us back when available. Thank you." Then immediately call finish_procurement_call with disposition VOICEMAIL and the current market revision. Do not restart the opener, disclose route or commercial constraints, or continue the quote conversation with voicemail.`,
+        "If the carrier says yes, record availability and only the exact listed required conditions, then ask once for every still-missing quote fact: all-in price, pickup time if required, and destination arrival time if required. Do not ask them to restate the requirement summary.",
+        `If this is clearly voicemail, wait for the greeting or tone, then call finish_procurement_call with disposition VOICEMAIL and the current market revision without speaking first. The server will play exactly: "Hi, this is Luna calling on behalf of Nextwave about order ${reference}. Please call us back when available. Thank you." and then hang up. Do not restart the opener, disclose route or commercial constraints, or continue the quote conversation with voicemail.`,
         "Use request_human_escalation only when the carrier asks for a person, introduces terms outside the mandate, or contradicts consequential shipment facts. Do not escalate merely to convert a date, recover from a tool-format error, or clarify a normal missing quote field.",
-        "request_human_escalation always succeeds. If it returns transferred:true you are done. If it returns handoff:\"CALLBACK\", say the returned 'say' line verbatim, then call finish_procurement_call with the returned marketRevision and disposition HUMAN. Never keep a carrier waiting on an open line after escalating.",
+        "request_human_escalation always succeeds. If it returns transferred:true you are done. If it returns handoff:\"CALLBACK\", call finish_procurement_call with the returned marketRevision and disposition HUMAN without speaking first; the server plays the closing. Never keep a carrier waiting on an open line after escalating.",
       ].join("\n"),
     };
   }
@@ -190,12 +199,49 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
     return { attached: attachment.status === "ATTACHED" || attachment.status === "CLOSED", result: attachment };
   }
 
-  recordUpdate(callId: string, input: unknown): ProcurementToolOutcome {
+  recordUpdate(callId: string, input: unknown, evidence: ProcurementTurnEvidence | null = null): ProcurementToolOutcome {
     const before = this.markets.getProcurementCallContext(callId);
     if (!before) throw new Error("Call is not attached to a procurement market.");
-    const state = this.markets.recordProgressiveOfferForCall(callId, normalizeProcurementUpdate(input, this.now(), {
+    const priorInstructions = instructionSnapshot(this.markets.listMarketCallInstructions(before.market.id));
+    const normalized = normalizeProcurementUpdate(input, this.now(), {
       expectedTemporalField: onlyMissingTemporalField(before),
-    }));
+      authoritativeTranscript: evidence?.transcript ?? null,
+      conversationItemId: evidence?.itemId ?? null,
+      allowedRequirements: before.market.mandate.conditions,
+    });
+    const transcript = evidence?.transcript ?? normalized.rawStatement ?? "";
+
+    // A model cannot declare a draft final. Confirmation is accepted only
+    // after the deterministic evaluator requested a recap and the latest
+    // carrier turn is an unqualified affirmative response.
+    if (normalized.firm === true
+      && (before.instruction.action !== "CONFIRM" || !isAffirmativeConfirmation(transcript))) {
+      delete normalized.firm;
+    }
+
+    // "Let me check" is conversation control, not an offer fact. Treat all
+    // content-free tool calls as no-ops so they cannot create a partial offer,
+    // advance the market revision, or wake the parallel calls.
+    if (!hasMaterialProcurementUpdate(normalized)) {
+      const pauseRequested = isCarrierPauseRequest(transcript);
+      return {
+        result: {
+          ok: true,
+          no_change: true,
+          pause_requested: pauseRequested,
+          market_revision: before.market.revision,
+          recorded_values: recordedValues(before.latestOffer),
+          instruction: before.instruction,
+          message: pauseRequested
+            ? "Say exactly: 'Of course—take your time. I’m here.' Then wait silently for the carrier. Do not repeat the shipment or ask another question."
+            : "No procurement fact was present. Acknowledge naturally and continue the current question without writing to the market.",
+          terminal: false,
+        },
+        controlUpdates: [],
+      };
+    }
+
+    const state = this.markets.recordProgressiveOfferForCall(callId, normalized);
     const carrier = state.carriers.find((candidate) => candidate.carrier.id === before.carrier.id)!;
     const offer = carrier.latestOffer;
     const awarded = carrier.instruction.action === "AWARD" && offer?.isComparable && offer.isValid;
@@ -244,16 +290,7 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
         feasible: offer?.isValid ?? true,
         violations: offer?.feasibilityViolations ?? [],
         missing_fields: offer?.missingFields ?? [],
-        recorded_values: {
-          availability: offer?.availability ?? "UNKNOWN",
-          price: offer?.price ?? null,
-          currency: offer?.currency ?? null,
-          rate_all_in: offer?.rateAllIn ?? null,
-          pickup_time: offer?.pickupTime ?? null,
-          expected_arrival: offer?.expectedArrival ?? null,
-          confirmed_requirements: offer?.confirmedRequirements ?? [],
-          rejected_requirements: offer?.rejectedRequirements ?? [],
-        },
+        recorded_values: recordedValues(offer),
         instruction: carrier.instruction,
         market_phase: state.phase,
         message: instructionMessage(carrier.instruction.action),
@@ -263,7 +300,7 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
         // favour, so the win reaches the model in the same tool result.
         award: this.awardPayload(callId),
       },
-      controlUpdates: [...this.controlUpdates(state.market.id, callId), ...callerUpdate],
+      controlUpdates: [...this.controlUpdates(state.market.id, callId, priorInstructions), ...callerUpdate],
       followUps,
     };
   }
@@ -373,10 +410,11 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
   markHumanRequired(callId: string, reason: string): ProcurementToolOutcome | null {
     const before = this.markets.getProcurementCallContext(callId);
     if (!before) return null;
+    const priorInstructions = instructionSnapshot(this.markets.listMarketCallInstructions(before.market.id));
     const state = this.markets.markCallHumanRequired(callId, reason);
     return state ? {
       result: { ok: true, human_required: true, reason, market_revision: state.market.revision },
-      controlUpdates: this.controlUpdates(before.market.id, callId),
+      controlUpdates: this.controlUpdates(before.market.id, callId, priorInstructions),
     } : null;
   }
 
@@ -398,16 +436,47 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
                 "RELEASE", "HUMAN_REQUIRED", "REQUEST_HUMAN_REVIEW", "AWARD",
               ] as const;
     const instruction = this.markets.validateCallInstruction(callId, marketRevision, [...allowed]);
-    return { ok: true, instruction, disposition };
+    const context = this.markets.getProcurementCallContext(callId);
+    if (!context) throw new Error("Call is not attached to a procurement market.");
+    return {
+      ok: true,
+      instruction,
+      disposition,
+      closing_message: buildFinishClosingMessage(disposition, publicOrderReference(context.order)),
+    };
   }
 
-  private controlUpdates(marketId: string, currentCallId: string): ProcurementControlUpdate[] {
+  private controlUpdates(
+    marketId: string,
+    currentCallId: string,
+    priorInstructions: ReadonlyMap<string, string>,
+  ): ProcurementControlUpdate[] {
     return this.markets.listMarketCallInstructions(marketId)
       .filter((entry) => entry.callId !== currentCallId)
-      .map((entry) => ({
-        callId: entry.callId,
-        instruction: `Shared market revision ${entry.instruction.marketRevision} changed. Current evaluator instruction: ${JSON.stringify(entry.instruction)}`,
-      }));
+      .filter((entry) => priorInstructions.get(entry.callId) !== instructionSignature(entry.instruction))
+      .map((entry) => {
+        const context = this.markets.getProcurementCallContext(entry.callId);
+        const offer = context?.latestOffer ?? null;
+        const closingMessage = entry.instruction.action === "AWARD" && context && offer
+          ? buildAwardClosingMessage({
+              reference: publicOrderReference(context.order),
+              origin: context.order.origin,
+              destination: context.order.destination,
+              price: offer.price,
+              currency: offer.currency,
+              pickupTime: offer.pickupTime,
+              expectedArrival: offer.expectedArrival,
+            })
+          : entry.instruction.action === "RELEASE"
+            ? "Thank you for your time. We will not proceed with this quote for this order. Goodbye."
+            : undefined;
+        return {
+          callId: entry.callId,
+          instruction: `Your evaluator action changed to: ${JSON.stringify(entry.instruction)}. Do not repeat the shipment introduction.`,
+          ...(closingMessage ? { closingMessage } : {}),
+          requestResponse: entry.instruction.action === "NEGOTIATE" || entry.instruction.action === "HUMAN_REQUIRED",
+        };
+      });
   }
 }
 
@@ -450,6 +519,24 @@ export function buildAwardClosingMessage(input: {
     "We'll send the confirmation email shortly. Thank you.",
   ];
   return details.filter(Boolean).join(" ");
+}
+
+export function buildFinishClosingMessage(
+  disposition: "RELEASE" | "COMPLETE" | "HUMAN" | "QUOTE_RECORDED" | "VOICEMAIL",
+  reference: string,
+): string {
+  switch (disposition) {
+    case "RELEASE":
+      return `Thank you for your time. We will not proceed with your quote for order ${reference}. Goodbye.`;
+    case "QUOTE_RECORDED":
+      return `Thank you. Your quote for order ${reference} is recorded but not yet selected. We will contact you if it is chosen. Goodbye.`;
+    case "HUMAN":
+      return "Thank you. A member of the Nextwave operations team will follow up with you. Goodbye.";
+    case "VOICEMAIL":
+      return `Hi, this is Luna calling on behalf of Nextwave about order ${reference}. Please call us back when available. Thank you.`;
+    case "COMPLETE":
+      return `Thank you. The confirmed terms for order ${reference} are recorded. Goodbye.`;
+  }
 }
 
 export function buildRetainedOfferRevalidationMessage(input: {
@@ -569,7 +656,12 @@ function formatVoiceMoney(amount: number, currency: string): string {
 export function normalizeProcurementUpdate(
   input: unknown,
   now: Date,
-  options: { expectedTemporalField?: "pickupTime" | "expectedArrival" | null } = {},
+  options: {
+    expectedTemporalField?: "pickupTime" | "expectedArrival" | null;
+    authoritativeTranscript?: string | null;
+    conversationItemId?: string | null;
+    allowedRequirements?: string[];
+  } = {},
 ): ProgressiveOfferUpdateInput {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw new Error("Procurement update must be an object.");
@@ -581,7 +673,22 @@ export function normalizeProcurementUpdate(
     if (key === "humanRequired" && entry === false) return false;
     return true;
   })) as ProgressiveOfferUpdateInput;
-  const rawStatement = typeof update.rawStatement === "string" ? update.rawStatement : null;
+  const proposedRawStatement = typeof update.rawStatement === "string" ? update.rawStatement.trim() : null;
+  const authoritativeTranscript = options.authoritativeTranscript?.trim() || null;
+  const rawStatement = authoritativeTranscript ?? proposedRawStatement;
+  if (authoritativeTranscript) {
+    update.rawStatement = authoritativeTranscript;
+    if (options.conversationItemId) update.conversationItemId = options.conversationItemId;
+    else delete update.conversationItemId;
+  }
+  if (options.allowedRequirements) {
+    if (update.confirmedRequirements !== undefined) {
+      update.confirmedRequirements = canonicalRequirements(update.confirmedRequirements, options.allowedRequirements);
+    }
+    if (update.rejectedRequirements !== undefined) {
+      update.rejectedRequirements = canonicalRequirements(update.rejectedRequirements, options.allowedRequirements);
+    }
+  }
   const suppliedTemporalFields = (["pickupTime", "expectedArrival"] as const)
     .filter((field) => typeof update[field] === "string");
   for (const field of ["pickupTime", "expectedArrival", "expiresAt"] as const) {
@@ -590,13 +697,15 @@ export function normalizeProcurementUpdate(
     const evidence = rawStatement && field !== "expiresAt"
       ? timestampFromRawStatement(rawStatement, field, suppliedTemporalFields, now, options.expectedTemporalField)
       : null;
-    const resolved = evidence && (!normalized || (typeof value === "string" && isDurationPhrase(value)))
-      ? evidence
-      : normalized;
+    // For pickup/arrival, the carrier transcript is the evidence boundary.
+    // Model-proposed dates are ignored unless the actual turn contains a
+    // parseable temporal expression. expiresAt has no conversational field
+    // disambiguation, so a strict normalized value remains acceptable.
+    const resolved = field === "expiresAt" ? normalized : rawStatement ? evidence : normalized;
     if (resolved) update[field] = resolved;
     else if (typeof value === "string") delete update[field];
   }
-  if (update.rateAllIn === undefined && typeof update.rawStatement === "string" && /\b(?:all[ -]?in|todo incluido)\b/i.test(update.rawStatement)) {
+  if (update.rateAllIn === undefined && rawStatement && /\b(?:all[ -]?in|todo incluido)\b/i.test(rawStatement)) {
     update.rateAllIn = true;
   }
   return update;
@@ -622,12 +731,15 @@ export function normalizeProcurementTimestamp(
 ): string | null {
   const clean = value.trim();
   if (!clean) return null;
-  const parsed = Date.parse(clean);
-  if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
-
   if (/\b(?:ago|hace)\b/i.test(clean)) return null;
   const anchored = parseAnchoredTimestamp(clean, now, timeZone);
   if (anchored) return anchored;
+  // Date.parse accepts bare numbers such as "5000" as January 1 in year 5000.
+  // Voice facts must use an explicit ISO timestamp or a parseable spoken date.
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:?\d{2})$/.test(clean)) {
+    const parsed = Date.parse(clean);
+    if (Number.isFinite(parsed) && isPlausibleProcurementInstant(parsed, now)) return new Date(parsed).toISOString();
+  }
   const relative = clean.match(/(?:^|\b)(?:in|within|by|about|approximately|takes?|taking|en|dentro de|para|tarda(?:r[aá])?)?\s*(\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|un|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\s*(?:business\s+)?(minutes?|mins?|hours?|hrs?|days?|minutos?|horas?|d[ií]as?)\b/i);
   if (!relative) return null;
   const amount = parseRelativeAmount(relative[1]!);
@@ -683,9 +795,75 @@ function onlyMissingTemporalField(context: {
   return missing.length === 1 ? missing[0]! : null;
 }
 
-function isDurationPhrase(value: string): boolean {
-  return /\b(?:minutes?|mins?|hours?|hrs?|days?|minutos?|horas?|d[ií]as?)\b/i.test(value)
-    && !/\b(?:today|tomorrow|hoy|ma(?:ñ|n)ana)\b/i.test(value);
+function canonicalRequirements(values: string[] | undefined, allowed: string[]): string[] {
+  const canonical = new Map(allowed.map((value) => [normalizeText(value), value]));
+  return [...new Set((values ?? []).flatMap((value) => {
+    const match = canonical.get(normalizeText(value));
+    return match ? [match] : [];
+  }))];
+}
+
+function normalizeText(value: string): string {
+  return value.trim().toLocaleLowerCase("en-US").normalize("NFD").replace(/\p{Diacritic}/gu, "").replace(/\s+/g, " ");
+}
+
+function isAffirmativeConfirmation(value: string): boolean {
+  const normalized = normalizeText(value).replace(/[^\p{Letter}\p{Number}\s]/gu, "").replace(/\s+/g, " ").trim();
+  if (/\b(?:but|pero|except|excepto)\b/.test(normalized)) return false;
+  return /^(?:yes|yes that is correct|yeah|yep|correct|that is correct|confirmed|si|correcto|de acuerdo|asi es|eso es)$/.test(normalized);
+}
+
+function isCarrierPauseRequest(value: string): boolean {
+  return /\b(?:let me (?:check|look|verify)|i(?:'|’)ll (?:check|look|verify)|one moment|hold on|give me (?:a|one) (?:moment|minute)|check with (?:my|the) system|dejame (?:revisar|verificar|checar)|un momento|perm[ií]teme revisar)\b/i
+    .test(normalizeText(value));
+}
+
+function hasMaterialProcurementUpdate(update: ProgressiveOfferUpdateInput): boolean {
+  return update.availability !== undefined
+    || update.price !== undefined
+    || update.rateAllIn !== undefined
+    || update.pickupTime !== undefined
+    || update.expectedArrival !== undefined
+    || update.firm !== undefined
+    || update.expiresAt !== undefined
+    || Boolean(update.accessorials?.length)
+    || Boolean(update.carrierConditions?.length)
+    || Boolean(update.confirmedRequirements?.length)
+    || Boolean(update.rejectedRequirements?.length)
+    || update.humanRequired === true;
+}
+
+function recordedValues(offer: OfferRecord | null) {
+  return {
+    availability: offer?.availability ?? "UNKNOWN",
+    price: offer?.price ?? null,
+    currency: offer?.currency ?? null,
+    rate_all_in: offer?.rateAllIn ?? null,
+    pickup_time: offer?.pickupTime ?? null,
+    expected_arrival: offer?.expectedArrival ?? null,
+    confirmed_requirements: offer?.confirmedRequirements ?? [],
+    rejected_requirements: offer?.rejectedRequirements ?? [],
+  };
+}
+
+function instructionSignature(instruction: MarketInstruction): string {
+  return JSON.stringify({
+    action: instruction.action,
+    reason: instruction.reason,
+    field: instruction.field,
+    targetPrice: instruction.targetPrice,
+    targetArrival: instruction.targetArrival,
+  });
+}
+
+function instructionSnapshot(entries: Array<{ callId: string; instruction: MarketInstruction }>): Map<string, string> {
+  return new Map(entries.map((entry) => [entry.callId, instructionSignature(entry.instruction)]));
+}
+
+function isPlausibleProcurementInstant(instant: number, now: Date): boolean {
+  const pastTolerance = 24 * 60 * 60 * 1_000;
+  const futureHorizon = 2 * 366 * 24 * 60 * 60 * 1_000;
+  return instant >= now.getTime() - pastTolerance && instant <= now.getTime() + futureHorizon;
 }
 
 function parseAnchoredTimestamp(value: string, now: Date, timeZone: string): string | null {
@@ -819,6 +997,7 @@ function parseRelativeAmount(value: string): number {
 function instructionMessage(action: string): string {
   switch (action) {
     case "ASK_MISSING_FIELD": return "Ask only for the named missing field, then record the answer immediately.";
+    case "CONFIRM": return "Read back the server-recorded price, pickup, and arrival once. Ask whether that exact quote is correct. Only a clear yes may set firm=true.";
     case "HOLD": return "The quote is complete. Ask whether the carrier prefers to hold briefly or be contacted if selected; never leave them in unexplained silence.";
     case "NEGOTIATE": return "Use only the returned target and then record the carrier's response.";
     case "RELEASE": return "Thank the carrier, close politely, then finish the call using this exact market revision.";

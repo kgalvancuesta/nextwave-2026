@@ -38,6 +38,7 @@ async function setup(options: { humanEscalationUri?: string; runtime?: FakeAgent
   const marketId = workspace.currentMarket!.market.id;
   markets.startMarket(marketId);
   const calls = repository.createOutboundBatch(carriers, "+12025550101", { orderId: workspace.order.id, marketId }).calls;
+  repository.attachTwilioSidIfMissing(calls[0]!.id, "CA_escalation");
   const runtime = options.runtime ?? new FakeAgentRuntime();
   const store = new VoltaStore(db);
   const service = new VoiceControlService(
