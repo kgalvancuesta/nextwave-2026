@@ -55,8 +55,6 @@ function awardMarket(context: ReturnType<typeof setup>) {
   const { markets, calls } = context;
   markets.recordProgressiveOfferForCall(calls[0]!.id, completeOffer(760, "2030-01-10T15:30:00.000Z"));
   markets.recordProgressiveOfferForCall(calls[1]!.id, completeOffer(700, "2030-01-10T16:00:00.000Z"));
-  markets.recordProgressiveOfferForCall(calls[2]!.id, completeOffer(850, "2030-01-10T17:00:00.000Z"));
-  markets.recordProgressiveOfferForCall(calls[2]!.id, completeOffer(650, "2030-01-10T15:00:00.000Z"));
   return markets.recordProgressiveOfferForCall(calls[2]!.id, completeOffer(640, "2030-01-10T15:00:00.000Z"));
 }
 

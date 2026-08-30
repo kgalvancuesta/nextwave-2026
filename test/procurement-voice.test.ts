@@ -91,6 +91,29 @@ describe("dashboard procurement voice bridge", () => {
       conversationItemId: "item_compound_quote",
     });
 
+    expect(normalizeProcurementUpdate({
+      availability: "AVAILABLE",
+      price: 1_450,
+      currency: "USD",
+      pickupTime: null,
+      expectedArrival: null,
+      rawStatement: "Yeah. 1450 all in, pickup tomorrow at eight and delivery around two thirty.",
+    }, now)).toMatchObject({
+      availability: "AVAILABLE",
+      price: 1_450,
+      currency: "USD",
+      rateAllIn: true,
+      pickupTime: "2026-08-30T14:00:00.000Z",
+      expectedArrival: "2026-08-30T20:30:00.000Z",
+    });
+
+    expect(normalizeProcurementUpdate({
+      expectedArrival: null,
+      rawStatement: "Probably around five.",
+    }, now, { expectedTemporalField: "expectedArrival" })).toMatchObject({
+      expectedArrival: "2026-08-30T11:00:00.000Z",
+    });
+
     expect(normalizeProcurementTimestamp("5000", now)).toBeNull();
     const corrupted = normalizeProcurementUpdate({
       price: 5_000,
@@ -143,17 +166,18 @@ describe("dashboard procurement voice bridge", () => {
       data: { call_id: "rtc_procurement", sip_headers: [{ name: "X-Internal-Call-ID", value: call.id }] },
     });
     expect(runtime.profile?.kind).toBe("procurement");
-    expect(runtime.profile?.instructions).toContain("carrier feasibility");
-    expect(runtime.profile?.instructions).toContain("The carrier never validates whether the buyer's schedule is correct");
-    expect(runtime.profile?.instructions).toContain("rawStatement must be the carrier's exact words");
-    expect(runtime.profile?.instructions).toContain("extract every explicit fact from that entire turn");
-    expect(runtime.profile?.instructions).toContain("A clear yes is enough");
-    expect(runtime.profile?.instructions).toContain("If this is clearly voicemail");
-    expect(runtime.profile?.instructions).toContain("A tool payload failure is not a reason for human escalation");
-    expect(runtime.profile?.instructions).toContain("Never ask again for a field whose recorded value is non-null");
-    expect(runtime.profile?.instructions).toContain("Never ask the same time question more than twice total");
-    expect(runtime.profile?.instructions).toContain("Never go silent after a polite acknowledgment");
-    expect(runtime.profile?.instructions).toContain("disposition VOICEMAIL");
+    expect(runtime.profile?.instructions).toContain("Can your company meet these requirements?");
+    expect(runtime.profile?.instructions).toContain("concise freight procurement agent");
+    expect(runtime.profile?.instructions).toContain("What destination arrival time can you commit to, and what is your all-in price in USD?");
+    expect(runtime.profile?.instructions).toContain("CONFIRM: recap once");
+    expect(runtime.profile?.instructions).toContain("Never negotiate or counter.");
+    expect(runtime.profile?.instructions).toContain("The server compares locked quotes and chooses the best feasible one.");
+    expect(runtime.profile?.instructions).toContain("Server action:");
+    expect(runtime.profile?.instructions).not.toContain("retained offer exactly as stated");
+    expect(runtime.profile?.instructions).not.toContain("get_procurement_instruction");
+    expect(runtime.profile?.instructions?.split("\n").length).toBeLessThanOrEqual(9);
+    expect(runtime.profile?.instructions).toContain("Voicemail: finish VOICEMAIL");
+    expect(runtime.profile?.instructions).toContain("never repeat recorded facts");
 
     const partial = await runtime.invokeTool!("record_procurement_update", {
       availability: "AVAILABLE",
@@ -230,18 +254,27 @@ describe("dashboard procurement voice bridge", () => {
       rateAllIn: null,
       pickupTime: null,
       expectedArrival: null,
-      firm: true,
+      firm: null,
       expiresAt: null,
       accessorials: [],
       carrierConditions: [],
       confirmedRequirements: [],
       rejectedRequirements: [],
-      rawStatement: "Yes, that is correct.",
+      rawStatement: "Yes.",
       confidence: 1,
       humanRequired: false,
       humanReason: null,
     }) as typeof draft;
     expect(result).toMatchObject({ ok: true, comparable: true, instruction: { action: "HOLD" } });
+
+    const revisionBeforeHold = (result as typeof result & { market_revision: number }).market_revision;
+    const hold = await runtime.invokeTool!("record_procurement_update", {
+      availability: "UNKNOWN", price: null, currency: null, rateAllIn: null,
+      pickupTime: null, expectedArrival: null, firm: false, expiresAt: null,
+      accessorials: [], carrierConditions: [], confirmedRequirements: [], rejectedRequirements: [],
+      rawStatement: "Hold.", confidence: 1, humanRequired: false, humanReason: null,
+    }) as { no_change: boolean; market_revision: number };
+    expect(hold).toMatchObject({ ok: true, no_change: true, market_revision: revisionBeforeHold });
     expect(markets.getMarketState(marketId)?.carriers.find((carrier) => carrier.carrier.id === carriers[0]!.id)?.latestOffer)
       .toMatchObject({
         availability: "AVAILABLE",
@@ -363,7 +396,7 @@ describe("dashboard procurement voice bridge", () => {
     expect(runtime.sessionsClosed).toBe(1);
   });
 
-  it("replaces the AI with the scripted closing after the website awards the live offer", async () => {
+  it("locks an explicit quote and replaces the AI with the scripted award closing", async () => {
     const { db, repository, markets } = createTestContext();
     const carrier = repository.createContact({ label: "Baja Carrier", phoneInput: "+12025550115", e164PhoneNumber: "+12025550115" });
     const workspace = markets.createOrder({
@@ -407,20 +440,10 @@ describe("dashboard procurement voice bridge", () => {
     });
     expect(await runtime.invokeTool!("record_procurement_update", {
       ...completeOffer,
-      availability: "UNKNOWN",
-      price: null,
-      currency: null,
-      rateAllIn: null,
-      pickupTime: null,
-      expectedArrival: null,
-      firm: true,
-      confirmedRequirements: [],
-      rawStatement: "Yes, that is correct.",
+      availability: "UNKNOWN", price: null, currency: null, rateAllIn: null,
+      pickupTime: null, expectedArrival: null, firm: false,
+      confirmedRequirements: [], rawStatement: "Yes.",
     })).toMatchObject({
-      instruction: { action: "NEGOTIATE" }, terminal: false,
-    });
-    markets.commitOffer(markets.getMarketState(marketId)!.bestOffer!.id);
-    expect(await runtime.invokeTool!("get_procurement_instruction", {})).toMatchObject({
       instruction: { action: "AWARD" }, terminal: true, scripted_message_dispatched: true,
     });
     expect(scripted).toHaveLength(1);

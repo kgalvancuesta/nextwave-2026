@@ -70,9 +70,9 @@ const procurementUpdateArgs = z.object({
   price: z.number().int().nonnegative().nullable(),
   currency: z.string().length(3).nullable(),
   rateAllIn: z.boolean().nullable(),
-  pickupTime: z.string().nullable().describe("When the truck can pick up the cargo. Pass ISO 8601 when explicitly known; otherwise pass the carrier's exact phrase verbatim, such as 'tomorrow at 8 AM' or 'in 2 hours'. Never put destination arrival here."),
-  expectedArrival: z.string().nullable().describe("When the cargo will reach the destination. Pass ISO 8601 when explicitly known; otherwise pass the carrier's exact phrase verbatim, such as 'August 30th at 5 PM' or 'by two days'. Never put pickup time here or convert a clock time to a duration."),
-  firm: z.boolean().nullable(),
+  pickupTime: z.string().nullable().describe("Pickup time the carrier stated, or null."),
+  expectedArrival: z.string().nullable().describe("Destination arrival time the carrier stated, or null."),
+  firm: z.boolean().nullable().describe("Server-owned quote state. Always pass null."),
   expiresAt: z.string().nullable().describe("ISO 8601 when known; otherwise the carrier's exact relative phrase."),
   accessorials: z.array(z.string()),
   carrierConditions: z.array(z.string()),
@@ -143,7 +143,7 @@ const requestHumanEscalation = tool<typeof escalationArgs, ToolContext, string>(
 
 const recordProcurementUpdate = tool<typeof procurementUpdateArgs, ToolContext, string>({
   name: "record_procurement_update",
-  description: "Extract and persist every explicit fact from the carrier's latest turn in one call, including compound statements with availability, price, currency, pickup, arrival, all-in status, and requirements. rawStatement must preserve the carrier's exact words rather than a summary. Supply every key; use null or [] only for facts not stated. Relative times are accepted verbatim and normalized by the server.",
+  description: "Record every fact the carrier actually stated in the latest turn. Use one update per turn; use null or [] for facts not stated. The server normalizes the transcript and decides the next action.",
   parameters: procurementUpdateArgs,
   execute: (input, runContext) => invoke(runContext, "record_procurement_update", procurementPatch(input)),
   errorFunction: procurementToolFailure,

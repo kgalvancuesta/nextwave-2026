@@ -208,7 +208,6 @@ export function evaluateMarket(input: MarketEvaluationInput): MarketEvaluation {
     return result("CLOSED", false, null, null);
   }
 
-  let negotiationPending = false;
   for (const carrier of input.carriers) {
     const offer = byCarrier.get(carrier.carrierId) ?? null;
     if (carrier.humanReason || offer?.humanRequired) {
@@ -255,17 +254,12 @@ export function evaluateMarket(input: MarketEvaluationInput): MarketEvaluation {
       actions[carrier.carrierId] = instruction("HOLD", "nondominated_offer_waiting_for_market", input.revision);
       continue;
     }
-    if (carrier.callActive && carrier.negotiationRounds < 1 && !timedOut) {
-      actions[carrier.carrierId] = negotiationInstruction(input.mandate, offer, ranked, input.revision);
-      negotiationPending = true;
-      continue;
-    }
-    actions[carrier.carrierId] = instruction("HOLD", "frontier_negotiation_complete", input.revision);
+    actions[carrier.carrierId] = instruction("HOLD", "quote_ready_for_comparison", input.revision);
   }
 
   const humanActive = input.carriers.some((carrier) => carrier.humanReason || byCarrier.get(carrier.carrierId)?.humanRequired);
   const enoughOffers = feasibleComparable.length >= input.mandate.minimumValidOffers || (discoveryComplete && feasibleComparable.length > 0);
-  const awardReady = input.automaticAward && discoveryComplete && enoughOffers && !negotiationPending && !humanActive;
+  const awardReady = input.automaticAward && discoveryComplete && enoughOffers && !humanActive;
   const awardOfferId = awardReady ? ranked[0]?.id ?? null : null;
 
   if (awardOfferId) {
@@ -385,32 +379,6 @@ function isDiscoveryResolved(carrier: MarketEvaluationCarrier, offer: EvaluatedP
   if (carrier.humanReason || carrier.callTerminal) return true;
   if (!offer) return false;
   return offer.availability === "UNAVAILABLE" || offer.comparable || (offer.firm === true && !offer.feasible);
-}
-
-function negotiationInstruction(
-  mandate: MandateSnapshot,
-  offer: EvaluatedProcurementOffer,
-  ranked: EvaluatedProcurementOffer[],
-  revision: number,
-): MarketInstruction {
-  const lowestPrice = Math.min(...ranked.map((candidate) => candidate.price ?? Infinity));
-  const earliestArrival = Math.min(...ranked.map((candidate) => Date.parse(candidate.expectedArrival!)));
-  const priceGap = Math.max(0, (offer.price ?? lowestPrice) - Math.min(mandate.targetPrice, lowestPrice));
-  const arrivalGap = Math.max(0, Date.parse(offer.expectedArrival!) - Math.min(Date.parse(mandate.preferredArrival ?? offer.expectedArrival!), earliestArrival));
-  if (arrivalGap > 0 && (offer.price === lowestPrice || mandate.speedWeight > mandate.priceWeight)) {
-    return {
-      ...instruction("NEGOTIATE", "improve_arrival_on_frontier", revision),
-      field: "arrival",
-      targetArrival: mandate.preferredArrival && Date.parse(mandate.preferredArrival) < Date.parse(offer.expectedArrival!)
-        ? mandate.preferredArrival
-        : new Date(earliestArrival).toISOString(),
-    };
-  }
-  return {
-    ...instruction("NEGOTIATE", "improve_price_on_frontier", revision),
-    field: "price",
-    targetPrice: Math.max(0, Math.round((offer.price ?? mandate.targetPrice) - Math.max(1, priceGap || (offer.price ?? 0) * 0.05))),
-  };
 }
 
 function instruction(action: EvaluatorAction, reason: string, marketRevision: number): MarketInstruction {
