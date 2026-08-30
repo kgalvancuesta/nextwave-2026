@@ -70,8 +70,8 @@ const procurementUpdateArgs = z.object({
   price: z.number().int().nonnegative().nullable(),
   currency: z.string().length(3).nullable(),
   rateAllIn: z.boolean().nullable(),
-  pickupTime: z.string().nullable().describe("Pickup time the carrier stated, or null."),
-  expectedArrival: z.string().nullable().describe("Destination arrival time the carrier stated, or null."),
+  pickupTime: z.string().nullable().describe("ISO 8601 pickup time interpreted from the carrier's words using the current conversation, immediately preceding question, and configured procurement timezone. Use null when genuinely ambiguous; never invent missing details."),
+  expectedArrival: z.string().nullable().describe("ISO 8601 destination arrival time interpreted from the carrier's words using the current conversation, immediately preceding question, and configured procurement timezone. Use null when genuinely ambiguous; never invent missing details."),
   firm: z.boolean().nullable().describe("Server-owned quote state. Always pass null."),
   expiresAt: z.string().nullable().describe("ISO 8601 when known; otherwise the carrier's exact relative phrase."),
   accessorials: z.array(z.string()),
@@ -143,7 +143,7 @@ const requestHumanEscalation = tool<typeof escalationArgs, ToolContext, string>(
 
 const recordProcurementUpdate = tool<typeof procurementUpdateArgs, ToolContext, string>({
   name: "record_procurement_update",
-  description: "Record every fact the carrier actually stated in the latest turn. Use one update per turn; use null or [] for facts not stated. The server normalizes the transcript and decides the next action.",
+  description: "Record every fact the carrier actually stated in the latest turn. Use one update per turn; use null or [] for facts not stated. Interpret clearly stated pickup and arrival times from conversational context and send ISO 8601 candidates; the server validates them, preserves transcript evidence, and decides the next action.",
   parameters: procurementUpdateArgs,
   execute: (input, runContext) => invoke(runContext, "record_procurement_update", procurementPatch(input)),
   errorFunction: procurementToolFailure,
@@ -229,7 +229,7 @@ function procurementToolFailure(_runContext: RunContext<ToolContext>, error: unk
     error: error instanceof Error ? error.message : String(error),
     retry: true,
     escalate: false,
-    instruction: "Retry the failed procurement tool once. For record_procurement_update, supply every key and use null or [] for unknown values. A payload, date-format, or stale-revision error is not a reason to request human escalation.",
+    instruction: "Retry the failed procurement tool once and do not describe the failure to the carrier. For record_procurement_update, supply every key and use null or [] for unknown values. A payload, date-format, or stale-revision error is not a reason to request human escalation. If a clearly stated fact remains missing, recover with only the natural confirmation or clarification needed.",
   });
 }
 

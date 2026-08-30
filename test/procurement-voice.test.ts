@@ -71,9 +71,9 @@ describe("dashboard procurement voice bridge", () => {
       rawStatement: "Pickup time stated as tomorrow at 8 AM; firm confirmed.",
     }, now)).toMatchObject({ pickupTime: "2026-08-30T14:00:00.000Z" });
     expect(normalizeProcurementUpdate({
-      pickupTime: "in 12 hours",
+      pickupTime: null,
       rawStatement: "August 30th at 5 PM.",
-    }, now)).toMatchObject({ pickupTime: "2026-08-30T23:00:00.000Z" });
+    }, now, { expectedTemporalField: "pickupTime" })).toMatchObject({ pickupTime: "2026-08-30T23:00:00.000Z" });
     expect(normalizeProcurementUpdate({
       price: 5_000,
       currency: "MXN",
@@ -137,6 +137,66 @@ describe("dashboard procurement voice bridge", () => {
     expect(corrupted.expectedArrival).toBeUndefined();
   });
 
+  it("retains valid structured times when authoritative transcript evidence is not independently parseable", () => {
+    const now = new Date("2026-08-29T23:40:00.000Z");
+    const pickup = normalizeProcurementUpdate({
+      pickupTime: "2026-08-30T17:00:00-06:00",
+      rawStatement: "model-generated summary that must not replace evidence",
+    }, now, {
+      expectedTemporalField: "pickupTime",
+      authoritativeTranscript: "Five.",
+      conversationItemId: "item_pickup_five",
+    });
+
+    expect(pickup).toMatchObject({
+      pickupTime: "2026-08-30T23:00:00.000Z",
+      rawStatement: "Five.",
+      conversationItemId: "item_pickup_five",
+    });
+
+    const arrival = normalizeProcurementUpdate({
+      expectedArrival: "2026-08-31T17:30:00-06:00",
+    }, now, {
+      expectedTemporalField: "expectedArrival",
+      authoritativeTranscript: "Five thirty.",
+      conversationItemId: "item_arrival_five_thirty",
+    });
+
+    expect(arrival).toMatchObject({
+      expectedArrival: "2026-08-31T23:30:00.000Z",
+      rawStatement: "Five thirty.",
+      conversationItemId: "item_arrival_five_thirty",
+    });
+  });
+
+  it("rejects invalid structured time candidates without relying on transcript parsing", () => {
+    const now = new Date("2026-08-29T23:40:00.000Z");
+    const invalid = normalizeProcurementUpdate({
+      pickupTime: "not-a-date",
+      expectedArrival: "2030-08-31T14:00:00-06:00",
+    }, now, { authoritativeTranscript: "Five." });
+
+    expect(invalid.pickupTime).toBeUndefined();
+    expect(invalid.expectedArrival).toBeUndefined();
+
+    const reversed = normalizeProcurementUpdate({
+      pickupTime: "2026-08-31T17:00:00-06:00",
+      expectedArrival: "2026-08-31T16:00:00-06:00",
+    }, now, { authoritativeTranscript: "Pickup at five and arrival at four." });
+
+    expect(reversed.pickupTime).toBe("2026-08-31T23:00:00.000Z");
+    expect(reversed.expectedArrival).toBeUndefined();
+
+    const conflictsWithStoredPickup = normalizeProcurementUpdate({
+      expectedArrival: "2026-08-31T16:00:00-06:00",
+    }, now, {
+      authoritativeTranscript: "Four PM.",
+      currentPickupTime: "2026-08-31T17:00:00-06:00",
+    });
+
+    expect(conflictsWithStoredPickup.expectedArrival).toBeUndefined();
+  });
+
   it("briefs a dashboard market call as procurement and streams tool facts into the shared market", async () => {
     const { db, repository, markets } = createTestContext();
     const carriers = [
@@ -155,10 +215,11 @@ describe("dashboard procurement voice bridge", () => {
     const call = repository.createOutboundBatch(carriers, "+12025550101", { orderId: workspace.order.id, marketId }).calls[0]!;
     repository.attachTwilioSidIfMissing(call.id, "CA_procurement");
     const runtime = new FakeAgentRuntime();
+    const adapter = new DashboardProcurementVoiceAdapter(markets, () => new Date("2030-01-10T03:30:00.000Z"));
     const service = new VoiceControlService(
       new VoltaStore(db), runtime, telephony, recap,
       { fromNumber: "+12025550101", sipUri: "sip:test@sip.api.openai.com", humanEscalationUri: "tel:+12025550121" },
-      new DashboardProcurementVoiceAdapter(markets, () => new Date("2030-01-10T03:30:00.000Z")),
+      adapter,
     );
 
     await service.handleOpenAiWebhook({
@@ -178,6 +239,9 @@ describe("dashboard procurement voice bridge", () => {
     expect(runtime.profile?.instructions?.split("\n").length).toBeLessThanOrEqual(9);
     expect(runtime.profile?.instructions).toContain("Voicemail: finish VOICEMAIL");
     expect(runtime.profile?.instructions).toContain("never repeat recorded facts");
+    expect(runtime.profile?.instructions).toContain("Normalize clearly stated pickup and arrival times to ISO 8601");
+    expect(runtime.profile?.instructions).toContain("America/Mexico_City");
+    expect(runtime.profile?.instructions).toContain("never mention recording, persistence, storage, tool, server, JSON, schema, formatting, or timestamp-parsing problems");
 
     const partial = await runtime.invokeTool!("record_procurement_update", {
       availability: "AVAILABLE",
@@ -199,24 +263,27 @@ describe("dashboard procurement voice bridge", () => {
     }) as { ok: boolean; instruction: { action: string } };
     expect(partial).toMatchObject({ ok: true, comparable: false, instruction: { action: "ASK_MISSING_FIELD" } });
 
-    const draft = await runtime.invokeTool!("record_procurement_update", {
+    const draft = adapter.recordUpdate(call.id, {
       availability: "UNKNOWN",
       price: null,
       currency: null,
       rateAllIn: null,
       pickupTime: null,
-      expectedArrival: "in 12 hours",
+      expectedArrival: "2030-01-10T05:00:00-06:00",
       firm: null,
       expiresAt: null,
       accessorials: [],
       carrierConditions: [],
       confirmedRequirements: [],
       rejectedRequirements: [],
-      rawStatement: "Arrival in 12 hours",
+      rawStatement: "model summary",
       confidence: 0.98,
       humanRequired: false,
       humanReason: null,
-    }) as {
+    }, {
+      transcript: "Five.",
+      itemId: "item_arrival_five",
+    }).result as {
       ok: boolean;
       instruction: { action: string };
       recorded_values: {
@@ -240,12 +307,19 @@ describe("dashboard procurement voice bridge", () => {
         currency: "USD",
         rate_all_in: true,
         pickup_time: null,
-        expected_arrival: "2030-01-10T15:30:00.000Z",
+        expected_arrival: "2030-01-10T11:00:00.000Z",
         confirmed_requirements: ["Tolls included"],
       },
       missing_fields: [],
       instruction: { action: "CONFIRM" },
     });
+    expect(markets.getMarketState(marketId)?.carriers.find((carrier) => carrier.carrier.id === carriers[0]!.id)?.latestOffer)
+      .toMatchObject({
+        expectedArrival: "2030-01-10T11:00:00.000Z",
+        firm: false,
+        rawStatement: "Five.",
+        conversationItemId: "item_arrival_five",
+      });
 
     const result = await runtime.invokeTool!("record_procurement_update", {
       availability: "UNKNOWN",
@@ -281,7 +355,8 @@ describe("dashboard procurement voice bridge", () => {
         price: 760,
         currency: "USD",
         rateAllIn: true,
-        expectedArrival: "2030-01-10T15:30:00.000Z",
+        expectedArrival: "2030-01-10T11:00:00.000Z",
+        firm: true,
         confirmedRequirements: ["Tolls included"],
       });
 
