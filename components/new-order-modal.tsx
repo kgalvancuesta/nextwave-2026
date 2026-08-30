@@ -11,6 +11,17 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Separator } from "@/components/ui/separator";
 
+const LOCATION_GROUPS: ReadonlyArray<{ label: string; options: readonly string[] }> = [
+  { label: "Mexico — Ports", options: ["Manzanillo", "Lázaro Cárdenas", "Veracruz", "Altamira", "Ensenada", "Puerto Progreso"] },
+  { label: "Mexico — Inland hubs", options: ["Guadalajara DC", "Mexico City (CDMX)", "Monterrey", "Querétaro", "Bajío (Silao)"] },
+  { label: "United States", options: ["Long Beach", "Houston", "Laredo", "Dallas"] },
+  { label: "International", options: ["Rotterdam", "Hamburg", "Algeciras", "Shanghai", "Singapore", "Santos"] },
+];
+
+function LocationOptions() {
+  return <>{LOCATION_GROUPS.map((group) => <optgroup key={group.label} label={group.label}>{group.options.map((option) => <option key={option} value={option}>{option}</option>)}</optgroup>)}</>;
+}
+
 interface Props {
   contacts: Contact[];
   onClose: () => void;
@@ -129,8 +140,8 @@ export function NewOrderModal({ contacts, onClose, onCreated, onAddCarrier }: Pr
                 <Field label="Order name" error={visibleErrors.name} wide><input data-field="name" aria-invalid={Boolean(visibleErrors.name)} autoFocus className="field-input" value={draft.name} onChange={(e) => update("name", e.target.value)} placeholder="Textiles Pacífico — Manzanillo → Guadalajara" /></Field>
                 <Field label="Client" error={visibleErrors.client}><input data-field="client" aria-invalid={Boolean(visibleErrors.client)} className="field-input" value={draft.client} onChange={(e) => update("client", e.target.value)} placeholder="Textiles Pacífico" /></Field>
                 <Field label="Order / reference number"><input className="field-input" value={draft.reference} onChange={(e) => update("reference", e.target.value)} placeholder="TCLU1234567 (generated if blank)" /></Field>
-                <Field label="Origin" error={visibleErrors.origin}><input data-field="origin" aria-invalid={Boolean(visibleErrors.origin)} className="field-input" value={draft.origin} onChange={(e) => update("origin", e.target.value)} placeholder="Port of Manzanillo" /></Field>
-                <Field label="Destination" error={visibleErrors.destination}><input data-field="destination" aria-invalid={Boolean(visibleErrors.destination)} className="field-input" value={draft.destination} onChange={(e) => update("destination", e.target.value)} placeholder="Guadalajara warehouse" /></Field>
+                <Field label="Origin" error={visibleErrors.origin}><select data-field="origin" aria-invalid={Boolean(visibleErrors.origin)} className="field-input" value={draft.origin} onChange={(e) => update("origin", e.target.value)}><option value="" disabled>Select origin</option><LocationOptions /></select></Field>
+                <Field label="Destination" error={visibleErrors.destination}><select data-field="destination" aria-invalid={Boolean(visibleErrors.destination)} className="field-input" value={draft.destination} onChange={(e) => update("destination", e.target.value)}><option value="" disabled>Select destination</option><LocationOptions /></select></Field>
               </div>
             </section>
 

@@ -15,7 +15,9 @@ export interface ActiveCallMarker {
   tone?: MarkerTone;
 }
 
-const DISPLAY = 232;
+// Fills the ~360px inner width of the right-hand column; the wrapper's
+// maxWidth:100% keeps it from overflowing on narrower layouts.
+const DISPLAY = 320;
 const DPR = 2;
 
 /** cobe takes colours as 0-1 RGB triples, so the brand hexes are pre-converted. */
@@ -57,6 +59,63 @@ const DEMO_MARKERS: ActiveCallMarker[] = [
   { callId: "demo-melbourne", label: "Melbourne", location: [-37.81, 144.96], detail: "Booked", tone: "green" },
 ];
 
+/** Plausible freight lanes between demo ports, as [from, to] callIds. Demo-only. */
+const DEMO_LANES: Array<[string, string]> = [
+  ["demo-manzanillo", "demo-long-beach"],
+  ["demo-veracruz", "demo-houston"],
+  ["demo-santos", "demo-algeciras"],
+  ["demo-shanghai", "demo-long-beach"],
+  ["demo-rotterdam", "demo-hamburg"],
+  ["demo-singapore", "demo-jebel-ali"],
+  ["demo-durban", "demo-santos"],
+  ["demo-sydney", "demo-singapore"],
+];
+
+const ARC_WIDTH = 0.4;
+const ARC_HEIGHT = 0.28;
+
+interface GlobeArc {
+  id: string;
+  from: [number, number];
+  to: [number, number];
+  color: [number, number, number];
+}
+
+/** Resolves lanes against the marker list so an arc can never point at a coordinate
+ *  without a marker; coloured by the destination's tone. Unknown ids are dropped. */
+function buildArcs(markers: ActiveCallMarker[], lanes: Array<[string, string]>): GlobeArc[] {
+  const byId = new Map(markers.map((m) => [m.callId, m]));
+  const arcs: GlobeArc[] = [];
+  for (const [fromId, toId] of lanes) {
+    const from = byId.get(fromId);
+    const to = byId.get(toId);
+    if (!from || !to) continue;
+    arcs.push({
+      id: `${fromId}->${toId}`,
+      from: from.location,
+      to: to.location,
+      color: to.tone ? TONE_RGB[to.tone] : BRAND_RGB,
+    });
+  }
+  return arcs;
+}
+
+const DEMO_ARCS = buildArcs(DEMO_MARKERS, DEMO_LANES);
+
+/** IN_PROGRESS → "In progress". */
+function sentenceCase(status: string): string {
+  const words = status.toLowerCase().replaceAll("_", " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+function toCobeMarkers(markers: ActiveCallMarker[]) {
+  return markers.map((marker) => ({
+    location: marker.location,
+    size: 0.06,
+    ...(marker.tone ? { color: TONE_RGB[marker.tone] } : {}),
+  }));
+}
+
 const TONE_ORDER: Record<MarkerTone, number> = { red: 0, yellow: 1, green: 2 };
 
 const LEGEND_LIMIT = 4;
@@ -89,15 +148,24 @@ function legendMarkers(markers: ActiveCallMarker[]): ActiveCallMarker[] {
 }
 
 export function GlobalCallGlobe({ markers }: { markers: ActiveCallMarker[] }) {
-  const displayMarkers = markers.length > 0 ? markers : DEMO_MARKERS;
+  const isDemo = markers.length === 0;
+  const displayMarkers = isDemo ? DEMO_MARKERS : markers;
+  // No lane data exists for live calls, so arcs are strictly a demo-state affordance.
+  const displayArcs = isDemo ? DEMO_ARCS : [];
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const phiRef = useRef(0);
   const globeRef = useRef<ReturnType<typeof createGlobe> | null>(null);
   const frameRef = useRef<number | null>(null);
+  const markersRef = useRef<ActiveCallMarker[]>(displayMarkers);
+  const arcsRef = useRef<GlobeArc[]>(displayArcs);
 
-  // Rebuilt only when the marker set actually changes, not on every 1.5s poll.
+  // Changes only when the marker set actually changes, not on every 1.5s poll.
   const markerKey = displayMarkers.map((m) => `${m.callId}:${m.tone ?? ""}`).join("|");
 
+  // One globe for the life of the component. Destroying and re-creating on the
+  // same canvas leaves it blank: a canvas whose WebGL context was released
+  // cannot hand out a new one, which is exactly what happened the first time a
+  // live call replaced the demo markers.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -115,11 +183,11 @@ export function GlobalCallGlobe({ markers }: { markers: ActiveCallMarker[] }) {
       baseColor: [0.86, 0.88, 0.93],
       markerColor: BRAND_RGB,
       glowColor: [1, 1, 1],
-      markers: displayMarkers.map((marker) => ({
-        location: marker.location,
-        size: 0.06,
-        ...(marker.tone ? { color: TONE_RGB[marker.tone] } : {}),
-      })),
+      markers: toCobeMarkers(markersRef.current),
+      arcs: arcsRef.current,
+      arcColor: BRAND_RGB,
+      arcWidth: ARC_WIDTH,
+      arcHeight: ARC_HEIGHT,
     });
     globeRef.current = globe;
 
@@ -136,6 +204,13 @@ export function GlobalCallGlobe({ markers }: { markers: ActiveCallMarker[] }) {
       globe.destroy();
       globeRef.current = null;
     };
+  }, []);
+
+  // Marker/arc changes are pushed into the existing instance instead.
+  useEffect(() => {
+    markersRef.current = displayMarkers;
+    arcsRef.current = displayArcs;
+    globeRef.current?.update({ markers: toCobeMarkers(displayMarkers), arcs: displayArcs });
   }, [markerKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
@@ -158,7 +233,8 @@ export function GlobalCallGlobe({ markers }: { markers: ActiveCallMarker[] }) {
 
       <ul className="space-y-1.5 border-t border-[var(--line)] pt-3">
         {legendMarkers(displayMarkers).map((marker) => {
-          const sub = marker.detail ?? marker.status ?? null;
+          // Live calls carry a raw status like IN_PROGRESS; read it as words.
+          const sub = marker.detail ?? (marker.status ? sentenceCase(marker.status) : null);
           return (
             <li key={marker.callId} className="flex items-center gap-2 text-[12.5px]">
               <span

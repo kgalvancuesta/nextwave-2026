@@ -32,7 +32,7 @@ export function buildAwardRecapBody(input: AwardRecapInput): string {
     : input.order.conditions;
 
   const lines = [
-    `NEXTWAVE - CONFIRMED BOOKING ${reference}`,
+    `SEMANTIKS - CONFIRMED BOOKING ${reference}`,
     `Carrier: ${input.carrierLabel}`,
     `Route: ${input.order.origin} -> ${input.order.destination}`,
     `Rate: ${formatMoney(input.offer.price, input.offer.currency)}${input.offer.rateAllIn ? " all-in" : ""}`,

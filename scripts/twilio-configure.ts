@@ -84,7 +84,7 @@ const client = apiKeySid && apiKeySecret
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
-console.log("Nextwave — Twilio phone number configurator");
+console.log("Semantiks — Twilio phone number configurator");
 console.log("─".repeat(50));
 console.log("Phone number :", phoneNumber);
 console.log("Voice URL    :", voiceUrl);

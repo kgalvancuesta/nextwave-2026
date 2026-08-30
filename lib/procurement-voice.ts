@@ -76,7 +76,7 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
       return {
         kind: "procurement",
         instructions: [
-          "You are Luna, Nextwave's concise carrier revalidation agent.",
+          "You are Luna from Semantiks, a concise carrier revalidation agent.",
           "This is not a new negotiation. Ask whether the carrier can still honor its own retained offer exactly as stated.",
           "Read the server-generated retained-offer recap below verbatim. Do not convert, recalculate, supplement, or relabel any date or time.",
           "Ask one yes-or-no question: whether they can still fulfill that commitment.",
@@ -94,7 +94,7 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
       return {
         kind: "amendment",
         instructions: [
-          "You are Luna, Nextwave's concise freight-operations voice agent.",
+          "You are Luna from Semantiks, a concise freight-operations voice agent.",
           "This inbound caller is the booked carrier for the matched order.",
           "Read the server-generated dashboard order recap below verbatim. It is the only authoritative spoken recap.",
           "Do not convert, recalculate, supplement, compare, or relabel any date or time. Do not speak raw ISO timestamps or UTC values.",
@@ -116,7 +116,7 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
       return {
         kind: "procurement",
         instructions: [
-          "You are Luna, Nextwave's concise freight procurement agent.",
+          "You are Luna from Semantiks, a concise freight procurement agent.",
           `Server action: ${context.instruction.action}; missing field: ${context.instruction.field ?? "none"}; revision: ${context.instruction.marketRevision}.`,
           `Say exactly: "${orderConfirmation}"`,
           `After yes, record it and ask exactly: "${quoteQuestion}"`,
@@ -153,7 +153,7 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
       kind: "procurement",
       instructions: [
         "# Role and objective",
-        "You are Luna, Nextwave's concise ground-transport procurement voice agent. You represent the buyer/procurer; the person on the phone represents the carrier.",
+        "You are Luna from Semantiks, a concise ground-transport procurement voice agent. You represent the buyer/procurer; the person on the phone represents the carrier.",
         "Talk naturally and briefly, extract only facts the carrier said, and follow the next action returned by the server.",
         "The server is the sole authority on validation, missing fields, feasibility, ranking, confirmation, release, and award.",
         `Normalize clearly stated pickup and arrival times to ISO 8601 using the conversation, the immediately preceding question, and procurement timezone ${PROCUREMENT_TIME_ZONE}. A short answer belongs to the field just asked about. If AM/PM or another essential detail is genuinely ambiguous, pass null and ask only that natural clarification. Never invent a time.`,
@@ -168,7 +168,7 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
         `Current server instruction: ${JSON.stringify(context.instruction)}`,
         ...latePolicy,
         `Open naturally and immediately by reading this requirement summary verbatim, then wait for a clear yes or no about carrier feasibility: "${orderConfirmation}"`,
-        `If this is clearly voicemail, wait for the greeting or tone, then call finish_procurement_call with disposition VOICEMAIL and the current market revision without speaking first. The server will play exactly: "Hi, this is Luna calling on behalf of Nextwave about order ${reference}. Please call us back when available. Thank you." and then hang up. Do not restart the opener, disclose route or commercial constraints, or continue the quote conversation with voicemail.`,
+        `If this is clearly voicemail, wait for the greeting or tone, then call finish_procurement_call with disposition VOICEMAIL and the current market revision without speaking first. The server will play exactly: "Hi, this is Luna calling on behalf of Semantiks about order ${reference}. Please call us back when available. Thank you." and then hang up. Do not restart the opener, disclose route or commercial constraints, or continue the quote conversation with voicemail.`,
         "Use request_human_escalation only when the carrier asks for a person, introduces terms outside the mandate, or contradicts consequential shipment facts. Do not escalate merely to convert a date, recover from a tool-format error, or clarify a normal missing quote field.",
         "request_human_escalation always succeeds. If it returns transferred:true you are done. If it returns handoff:\"CALLBACK\", call finish_procurement_call with the returned marketRevision and disposition HUMAN without speaking first; the server plays the closing. Never keep a carrier waiting on an open line after escalating.",
       ].join("\n"),
@@ -501,7 +501,7 @@ export function buildOrderConfirmationMessage(input: {
   conditions: string[];
 }): string {
   const details = [
-    `Hi, this is Luna calling on behalf of Nextwave about order ${input.reference}, from ${input.origin} to ${input.destination}.`,
+    `Hi, this is Luna calling on behalf of Semantiks about order ${input.reference}, from ${input.origin} to ${input.destination}.`,
     input.preferredPickup ? `Preferred pickup is ${formatVoiceTimestamp(input.preferredPickup)}.` : null,
     input.mustPickupBy ? `Pickup must be no later than ${formatVoiceTimestamp(input.mustPickupBy)}.` : null,
     input.preferredArrival ? `Preferred destination arrival is ${formatVoiceTimestamp(input.preferredArrival)}.` : null,
@@ -541,9 +541,9 @@ export function buildFinishClosingMessage(
     case "QUOTE_RECORDED":
       return `Thank you. Your quote for order ${reference} is recorded but not yet selected. We will contact you if it is chosen. Goodbye.`;
     case "HUMAN":
-      return "Thank you. A member of the Nextwave operations team will follow up with you. Goodbye.";
+      return "Thank you. A member of the Semantiks operations team will follow up with you. Goodbye.";
     case "VOICEMAIL":
-      return `Hi, this is Luna calling on behalf of Nextwave about order ${reference}. Please call us back when available. Thank you.`;
+      return `Hi, this is Luna calling on behalf of Semantiks about order ${reference}. Please call us back when available. Thank you.`;
     case "COMPLETE":
       return `Thank you. The confirmed terms for order ${reference} are recorded. Goodbye.`;
   }
@@ -557,7 +557,7 @@ export function buildRetainedOfferRevalidationMessage(input: {
   expectedArrival: string | null;
 }): string {
   return [
-    `Hi, this is Luna calling on behalf of Nextwave about order ${input.reference}.`,
+    `Hi, this is Luna calling on behalf of Semantiks about order ${input.reference}.`,
     input.price !== null && input.currency ? `You previously offered ${formatVoiceMoney(input.price, input.currency)}.` : null,
     input.pickupTime ? `The prior pickup was ${formatVoiceTimestamp(input.pickupTime)}.` : null,
     input.expectedArrival ? `The prior destination arrival was ${formatVoiceTimestamp(input.expectedArrival)}.` : null,
@@ -591,7 +591,7 @@ export function buildCancellationNotificationMessage(
   originalCarrier: string,
   selectedCarrier: string,
 ): string {
-  return `Hi, this is Luna calling on behalf of Nextwave about order ${reference}. `
+  return `Hi, this is Luna calling on behalf of Semantiks about order ${reference}. `
     + `${originalCarrier}'s prior commitment is canceled because a better retained offer was reconfirmed with ${selectedCarrier}. `
     + "The cancellation is effective now, and written notice will follow. Thank you.";
 }

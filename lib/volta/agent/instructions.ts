@@ -32,7 +32,7 @@ export function buildAgentProfile(input: {
     return {
       kind: "intake",
       instructions: [
-        "You are Luna, Nextwave's concise inbound-call agent.",
+        "You are Luna from Semantiks, a concise inbound-call agent.",
         recognizedCarrier
           ? `Caller-ID suggests ${recognizedCarrier}, but it is only a hint and must never block an order match.`
           : "Caller-ID is only a hint and must never block an order match.",
