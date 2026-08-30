@@ -11,6 +11,8 @@ import { loadTelephonyConfig } from "./config";
 import { publicOrderReference } from "./market-types";
 import { getRepository, type MarketlineRepository } from "./repository";
 import { TwilioTelephonyProvider, type TelephonyProvider } from "./telephony";
+import { buildAwardReadback } from "./recap";
+import { flushAwardRecaps } from "./recap-service";
 import type { AgentCallProfile } from "./volta/agent/agent-context";
 import type { ProcurementControlUpdate, ProcurementFollowUp, ProcurementToolOutcome, ProcurementVoicePort } from "./volta/ports";
 
@@ -102,13 +104,30 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
         ].join("\n"),
       };
     }
-    const latePolicy = context.marketClosed
+    const latePolicy = context.award
+      ? [
+          "This carrier WON the market. The deterministic server already created the commitment; you are confirming it, not negotiating it.",
+          `Read these exact terms back before anything else: ${buildAwardReadback({
+            commitmentId: context.award.commitmentId,
+            order: context.order,
+            carrierLabel: context.carrier.label,
+            offer: context.award.offer,
+          })}.`,
+          "Ask the carrier to confirm out loud that those terms are correct.",
+          context.award.recapAddress
+            ? `Then tell them a written confirmation with booking ID ${context.award.commitmentId} is being sent by SMS to ${context.award.recapAddress}, and to reply DISPUTE within 30 minutes if anything is wrong.`
+            : `Then give them the booking ID ${context.award.commitmentId} and say the written confirmation will follow.`,
+          "If the carrier disputes any term during the read-back, do not argue and do not re-negotiate: call request_human_escalation with the disputed term.",
+          "After the read-back is confirmed, say goodbye and call finish_procurement_call with disposition COMPLETE.",
+        ]
+      : context.marketClosed
       ? [
           "This market is already awarded or closed. Collect a late improved offer for the audit trail if the carrier provides one.",
           "Do not imply the existing award will be revoked and do not make a new commitment.",
         ]
       : [
           "After each useful fact or changed term, call record_procurement_update immediately. Do not wait for the call to end.",
+          "Always pass conversationItemId: the id of the item where the carrier actually said it. It is the audio evidence for that fact. Pass null rather than a guessed id.",
           "Persist known facts even when another fact is ambiguous. Use null and [] for unknown fields; never omit a required tool key.",
           "When the carrier says the rate is all-in or todo incluido, set rateAllIn=true in that same update.",
           `Call clock: ${callClock.toISOString()}. Unqualified carrier times are interpreted in ${PROCUREMENT_TIME_ZONE}.`,
@@ -124,7 +143,7 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
           "HOLD means thank the carrier and ask them to hold briefly while active options are compared. Avoid prolonged silence; offer a callback if waiting becomes unreasonable.",
           "NEGOTIATE means ask only for the evaluator-approved price or arrival improvement. Never invent a counter.",
           "RELEASE means thank the carrier, explain that Nextwave will not proceed now, say goodbye, then call finish_procurement_call.",
-          "AWARD means the deterministic server has already awarded this carrier. Do not discuss who has authority and do not ask another question. The server will replace this conversation with the exact scripted closing_message and end the call.",
+          "AWARD means the deterministic server has committed this carrier, queued the written recap, and will replace this conversation with the exact scripted closing_message. Do not ask another question or alter any term.",
         ];
 
     return {
@@ -219,6 +238,9 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
         message: instructionMessage(carrier.instruction.action),
         terminal: awarded,
         closing_message: closingMessage,
+        // This update may be the one that closed the market in this carrier's
+        // favour, so the win reaches the model in the same tool result.
+        award: this.awardPayload(callId),
       },
       controlUpdates: [...this.controlUpdates(state.market.id, callId), ...callerUpdate],
       followUps,
@@ -295,6 +317,35 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
         pickupTime: offer.pickupTime,
         expectedArrival: offer.expectedArrival,
       }) : null,
+      award: this.awardPayload(callId),
+    };
+  }
+
+  async flushRecaps(): Promise<void> {
+    try {
+      await flushAwardRecaps(this.markets);
+    } catch (error) {
+      // A recap that cannot be sent must never fail the tool call that
+      // triggered it; the pending row is retried on the next flush.
+      console.warn("Recap flush failed during a live call", error);
+    }
+  }
+
+  /** The exact terms the winning carrier must hear read back, or null. */
+  private awardPayload(callId: string): unknown {
+    const context = this.markets.getProcurementCallContext(callId);
+    if (!context?.award) return null;
+    return {
+      won: true,
+      commitment_id: context.award.commitmentId,
+      readback: buildAwardReadback({
+        commitmentId: context.award.commitmentId,
+        order: context.order,
+        carrierLabel: context.carrier.label,
+        offer: context.award.offer,
+      }),
+      recap_address: context.award.recapAddress,
+      instruction: "The server will play the exact committed terms, mention the written confirmation, and end the call.",
     };
   }
 
@@ -709,7 +760,7 @@ function instructionMessage(action: string): string {
     case "NEGOTIATE": return "Use only the returned target and then record the carrier's response.";
     case "RELEASE": return "Thank the carrier, close politely, then finish the call using this exact market revision.";
     case "HUMAN_REQUIRED": return "Keep the rest of the market running and transfer only this call if configured.";
-    case "AWARD": return "The carrier has been awarded. Play the scripted closing message and end the call without further questions.";
+    case "AWARD": return "The carrier has been awarded. The server will play the exact scripted terms, queue the written recap, and end the call without further questions.";
     default: return "Continue concise discovery and persist each useful fact.";
   }
 }

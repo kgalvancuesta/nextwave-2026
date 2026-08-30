@@ -1,9 +1,9 @@
 "use client";
 
-import { AlertTriangle, ArrowRight, Check, ChevronDown, ChevronUp, PhoneCall, Plus, RotateCcw, Trophy, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, ChevronDown, ChevronUp, FileText, PhoneCall, Plus, RotateCcw, Trophy, Volume2, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { errorMessage, requestJson } from "@/lib/client-http";
-import { publicOrderReference, type AmendmentRecord, type MarketCarrierState, type MarketState, type OfferRecord, type OrderEventRecord, type OrderWorkspace } from "@/lib/market-types";
+import { publicOrderReference, type AmendmentRecord, type CommitmentRecord, type MarketCarrierState, type MarketState, type OfferRecord, type OrderEventRecord, type OrderWorkspace } from "@/lib/market-types";
 
 interface Props {
   workspace: OrderWorkspace;
@@ -69,7 +69,7 @@ export function OrderWorkspaceCard({ workspace, expanded, onToggle, onChanged }:
               revalidating={workspace.markets.some((state) => state.market.id === latestAmendment.recoveryMarketId && state.market.reason === "AMENDMENT_REVALIDATION" && !["COMMITTED", "CANCELED"].includes(state.market.status))}
             />}
 
-            {activeCommitment && <section><SectionHeader label="Commitment" /><div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50/70 p-4"><div className="flex items-start justify-between gap-3"><div><p className="font-semibold text-emerald-950">{activeCommitment.carrierLabel}</p><p className="mt-1 font-mono text-xs uppercase tracking-wider text-emerald-800">Active commitment</p></div><Trophy size={19} className="text-emerald-700" /></div><div className="mt-4 grid gap-2 sm:grid-cols-2"><button disabled={busy} onClick={() => void mutate(() => requestJson(`/api/orders/${order.id}/complete`, { method: "POST" }))} className="rounded-lg bg-emerald-800 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-900">Mark completed</button><button disabled={busy} onClick={invalidateCommitment} className="rounded-lg border border-red-200 bg-white px-3 py-2 text-sm font-semibold text-red-800 hover:bg-red-50">Mark carrier failed</button></div></div></section>}
+            {activeCommitment && <section><SectionHeader label="Commitment" /><div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50/70 p-4"><div className="flex items-start justify-between gap-3"><div><p className="font-semibold text-emerald-950">{activeCommitment.carrierLabel}</p><p className="mt-1 font-mono text-xs uppercase tracking-wider text-emerald-800">Active commitment</p></div><Trophy size={19} className="text-emerald-700" /></div><RecapPanel commitment={activeCommitment} /><div className="mt-4 grid gap-2 sm:grid-cols-2"><button disabled={busy} onClick={() => void mutate(() => requestJson(`/api/orders/${order.id}/complete`, { method: "POST" }))} className="rounded-lg bg-emerald-800 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-900">Mark completed</button><button disabled={busy} onClick={invalidateCommitment} className="rounded-lg border border-red-200 bg-white px-3 py-2 text-sm font-semibold text-red-800 hover:bg-red-50">Mark carrier failed</button></div></div></section>}
 
             {order.lifecycleStatus === "EXCEPTION" && !workspace.markets.some((state) => state.market.reason === "CARRIER_FAILURE" && ["DRAFT", "OPEN", "CALLING", "NEGOTIATING"].includes(state.market.status)) && <button disabled={busy} onClick={() => void mutate(() => requestJson(`/api/orders/${order.id}/markets`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}) }))} className="flex w-full items-center justify-center gap-2 rounded-xl bg-red-700 px-4 py-3 font-semibold text-white"><RotateCcw size={17} /> Create recovery market</button>}
           </div>
@@ -127,6 +127,32 @@ function DemurrageRiskPanel({ order, calls, busy, onResolve }: { order: OrderWor
   </section>;
 }
 
+/**
+ * A verbal agreement the carrier cannot re-read is not evidence. This shows
+ * whether the written record actually reached them, and what it said.
+ */
+function RecapPanel({ commitment }: { commitment: CommitmentRecord }) {
+  const [open, setOpen] = useState(false);
+  if (commitment.recapStatus === "NOT_REQUIRED") return null;
+  const tone = commitment.recapStatus === "SENT" ? "text-emerald-800"
+    : commitment.recapStatus === "FAILED" ? "text-red-800" : "text-amber-800";
+  const label = commitment.recapStatus === "SENT" ? `Written recap sent to ${commitment.recapAddress}`
+    : commitment.recapStatus === "FAILED" ? "Written recap failed"
+      : "Written recap queued";
+  return <div className="mt-3 border-t border-emerald-200 pt-3">
+    <div className="flex items-start gap-2">
+      <FileText size={14} className={`mt-0.5 shrink-0 ${tone}`} />
+      <div className="min-w-0 flex-1">
+        <p className={`text-xs font-semibold ${tone}`}>{label}</p>
+        {commitment.recapSentAt && <p className="font-mono text-[10px] text-emerald-800">{formatDate(commitment.recapSentAt, true)} · {commitment.recapDeliveryId}</p>}
+        {commitment.recapError && <p className="mt-0.5 text-[11px] text-red-800">{commitment.recapError}</p>}
+        {commitment.recapBody && <button type="button" onClick={() => setOpen(!open)} className="mt-1 font-mono text-[10px] uppercase tracking-wider text-emerald-800 hover:underline">{open ? "Hide" : "Show"} what was sent</button>}
+      </div>
+    </div>
+    {open && commitment.recapBody && <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-white/80 p-2 text-[11px] leading-relaxed text-emerald-950">{commitment.recapBody}</pre>}
+  </div>;
+}
+
 function MarketPanel({ market, busy, onStart, onAddOffer, onCommit }: { market: MarketState; busy: boolean; onStart: () => void; onAddOffer: () => void; onCommit: (offer: OfferRecord) => void }) {
   const canStart = market.market.status === "DRAFT" && market.progress.callsStarted === 0;
   const canAddOffer = ["DRAFT", "OPEN", "CALLING", "NEGOTIATING", "HUMAN_REVIEW"].includes(market.market.status);
@@ -147,7 +173,7 @@ function CarrierRow({ carrier, canCommit, onCommit }: { carrier: MarketCarrierSt
   const awaitingReconfirmation = !carrier.latestOffer && Boolean(carrier.retainedOffer);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const classification = offerClassificationLabel(offer);
-  return <><tr className={carrier.rank === 1 ? "best-row" : ""}><td><div className="font-semibold">{carrier.carrier.label}</div>{carrier.latestCall && <><div className="mt-0.5 font-mono text-[10px] text-[var(--muted)]">Call {displayStatus(carrier.latestCall.status)}</div>{carrier.latestCall.errorMessage && <div className="mt-1 max-w-xs text-xs text-red-700">{carrier.latestCall.errorMessage}</div>}</>}</td><td>{offer ? <><span className="font-semibold">{money(offer.price, offer.currency)}</span>{awaitingReconfirmation && <span className="ml-2 text-[10px] font-semibold uppercase text-blue-700">Prior · confirm</span>}{classification && !awaitingReconfirmation && <span className={`ml-2 text-[10px] font-semibold uppercase ${offer.classification === "INFEASIBLE" ? "text-red-700" : "text-amber-700"}`}>{classification}</span>}{offer.normalizedPrice !== null && offer.currency !== offer.normalizedCurrency && <span className="mt-0.5 block text-[10px] text-[var(--muted)]">{money(offer.normalizedPrice, offer.normalizedCurrency)} standardized</span>}{offer.missingFields.length > 0 && <span className="mt-0.5 block text-[10px] text-[var(--muted)]">Needs {offer.missingFields.map(missingFieldLabel).join(", ")}</span>}</> : "—"}</td><td>{formatDate(offer?.expectedArrival || null, true)}</td><td><span className="font-mono text-[10px] uppercase tracking-wider">{awaitingReconfirmation ? "awaiting confirmation" : displayStatus(carrier.status)}</span><span className="mt-0.5 block text-[10px] text-[var(--muted)]">{displayStatus(carrier.instruction.action)}</span></td><td>{carrier.rank ? <span className="rank-chip">{carrier.rank}</span> : "—"}</td><td className="text-right"><div className="flex justify-end gap-2">{offer && <button onClick={() => setDetailsOpen((open) => !open)} className="rounded-lg border border-[var(--line)] px-3 py-1.5 text-xs font-semibold">{detailsOpen ? "Hide" : "Details"}</button>}{offer && canCommit && <button onClick={() => onCommit(offer)} className="rounded-lg bg-[var(--ink)] px-3 py-1.5 text-xs font-semibold text-white">Commit</button>}</div></td></tr>{offer && detailsOpen && <tr><td colSpan={6} className="bg-[var(--paper)]"><OfferDetails offer={offer} /></td></tr>}</>;
+  return <><tr className={carrier.rank === 1 ? "best-row" : ""}><td><div className="font-semibold">{carrier.carrier.label}</div>{carrier.latestCall && <><div className="mt-0.5 font-mono text-[10px] text-[var(--muted)]">Call {displayStatus(carrier.latestCall.status)}</div>{carrier.latestCall.errorMessage && <div className="mt-1 max-w-xs text-xs text-red-700">{carrier.latestCall.errorMessage}</div>}</>}</td><td>{offer ? <><span className="font-semibold">{money(offer.price, offer.currency)}</span>{awaitingReconfirmation && <span className="ml-2 text-[10px] font-semibold uppercase text-blue-700">Prior · confirm</span>}{classification && !awaitingReconfirmation && <span className={`ml-2 text-[10px] font-semibold uppercase ${offer.classification === "INFEASIBLE" ? "text-red-700" : "text-amber-700"}`}>{classification}</span>}{offer.normalizedPrice !== null && offer.currency !== offer.normalizedCurrency && <span className="mt-0.5 block text-[10px] text-[var(--muted)]">{money(offer.normalizedPrice, offer.normalizedCurrency)} standardized</span>}{offer.missingFields.length > 0 && <span className="mt-0.5 block text-[10px] text-[var(--muted)]">Needs {offer.missingFields.map(missingFieldLabel).join(", ")}</span>}{offer.evidence && <EvidenceButton offer={offer} />}</> : "—"}</td><td>{formatDate(offer?.expectedArrival || null, true)}</td><td><span className="font-mono text-[10px] uppercase tracking-wider">{awaitingReconfirmation ? "awaiting confirmation" : displayStatus(carrier.status)}</span><span className="mt-0.5 block text-[10px] text-[var(--muted)]">{displayStatus(carrier.instruction.action)}</span></td><td>{carrier.rank ? <span className="rank-chip">{carrier.rank}</span> : "—"}</td><td className="text-right"><div className="flex justify-end gap-2">{offer && <button onClick={() => setDetailsOpen((open) => !open)} className="rounded-lg border border-[var(--line)] px-3 py-1.5 text-xs font-semibold">{detailsOpen ? "Hide" : "Details"}</button>}{offer && canCommit && <button onClick={() => onCommit(offer)} className="rounded-lg bg-[var(--ink)] px-3 py-1.5 text-xs font-semibold text-white">Commit</button>}</div></td></tr>{offer && detailsOpen && <tr><td colSpan={6} className="bg-[var(--paper)]"><OfferDetails offer={offer} /></td></tr>}</>;
 }
 
 function OfferDetails({ offer }: { offer: OfferRecord }) {
@@ -155,6 +181,29 @@ function OfferDetails({ offer }: { offer: OfferRecord }) {
 }
 
 function Detail({ label, value }: { label: string; value: string }) { return <div className="flex justify-between gap-4"><dt className="text-[var(--muted)]">{label}</dt><dd className="text-right font-medium">{value}</dd></div>; }
+
+function EvidenceButton({ offer }: { offer: OfferRecord }) {
+  const [open, setOpen] = useState(false);
+  const evidence = offer.evidence!;
+  const seconds = evidence.offsetMs !== null ? Math.max(0, Math.floor(evidence.offsetMs / 1000)) : null;
+  if (!evidence.audioUrl && !evidence.rawStatement) return null;
+  return <div className="mt-1">
+    <button type="button" onClick={() => setOpen(!open)} className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wider text-[var(--muted)] hover:text-[var(--ink)]">
+      <Volume2 size={12} /> Evidence{seconds !== null ? ` · ${formatOffset(seconds)}` : ""}
+    </button>
+    {open && <div className="mt-1.5 max-w-xs rounded-lg border border-[var(--line)] bg-[var(--paper)] p-2">
+      {evidence.rawStatement && <p className="text-xs italic text-[var(--ink)]">&ldquo;{evidence.rawStatement}&rdquo;</p>}
+      {evidence.audioUrl
+        ? <audio controls preload="none" className="mt-1.5 w-full" src={`${evidence.audioUrl}${seconds ? `#t=${seconds}` : ""}`} />
+        : <p className="mt-1 text-[10px] text-[var(--muted)]">Audio not available. Set RECORD_CALLS=true before the call to capture it.</p>}
+      <p className="mt-1 font-mono text-[10px] text-[var(--muted)]">Captured {formatDate(evidence.capturedAt, true)}</p>
+    </div>}
+  </div>;
+}
+
+function formatOffset(seconds: number): string {
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
 
 function EventItem({ event, technical = false }: { event: OrderEventRecord; technical?: boolean }) {
   const summary = eventSummary(event);

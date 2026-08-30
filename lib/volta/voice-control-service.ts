@@ -387,6 +387,9 @@ export class VoiceControlService {
       const outcome = this.procurement.recordUpdate(call.id, args);
       await this.propagateProcurementUpdates(outcome.controlUpdates);
       await this.procurement.runFollowUps(outcome.followUps ?? []);
+      // Recording a fact can close the market. Deliver the persisted recap
+      // before replacing the live conversation with its scripted closing.
+      await this.procurement.flushRecaps();
       return this.handleAwardClosing(call.id, outcome.result);
     }
 

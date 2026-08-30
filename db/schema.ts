@@ -356,6 +356,34 @@ export const migrations = [
       "CREATE INDEX idx_market_carriers_revalidation ON market_carriers(amendment_id, source_offer_id)",
     ],
   },
+  {
+    // A commitment is not trustworthy until the counterparty holds the same
+    // terms in writing. The recap body is frozen next to the commitment inside
+    // the award transaction, so what was sent is auditable even if delivery
+    // fails or is retried later.
+    id: "008_commitment_recap",
+    statements: [
+      "ALTER TABLE commitments ADD COLUMN recap_status TEXT NOT NULL DEFAULT 'NOT_REQUIRED'",
+      "ALTER TABLE commitments ADD COLUMN recap_channel TEXT",
+      "ALTER TABLE commitments ADD COLUMN recap_address TEXT",
+      "ALTER TABLE commitments ADD COLUMN recap_body TEXT",
+      "ALTER TABLE commitments ADD COLUMN recap_delivery_id TEXT",
+      "ALTER TABLE commitments ADD COLUMN recap_error TEXT",
+      "ALTER TABLE commitments ADD COLUMN recap_sent_at TEXT",
+      "ALTER TABLE commitments ADD COLUMN recap_attempts INTEGER NOT NULL DEFAULT 0",
+      "CREATE INDEX idx_commitments_recap_pending ON commitments(recap_status) WHERE recap_status = 'PENDING'",
+    ],
+  },
+  {
+    // Every recorded fact points at the moment it was said. The offset is
+    // measured by the server from the call clock; the model only supplies the
+    // conversation item id it already owns.
+    id: "009_offer_audio_evidence",
+    statements: [
+      "ALTER TABLE procurement_offer_versions ADD COLUMN conversation_item_id TEXT",
+      "ALTER TABLE procurement_offer_versions ADD COLUMN evidence_offset_ms INTEGER",
+    ],
+  },
 ] as const;
 
 export function applyMigrations(db: Database.Database): string[] {

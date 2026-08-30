@@ -109,6 +109,12 @@ export interface ProcurementVoicePort {
   getInstruction(callId: string): unknown;
   markHumanRequired(callId: string, reason: string): ProcurementToolOutcome | null;
   validateFinish(callId: string, marketRevision: number): unknown;
+  /**
+   * Delivers any written recap the award transaction queued. Called from the
+   * live call path so the carrier receives the SMS while still on the phone,
+   * and never allowed to fail the tool call that triggered it.
+   */
+  flushRecaps(): Promise<void>;
 }
 
 /** A live agent attached to one call. Owned by the process that accepted it. */
