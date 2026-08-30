@@ -27,8 +27,10 @@ export const REALTIME_INPUT_AUDIO_CONFIG = {
     prompt: "Ground-transport carrier quote. Preserve every price, currency, date, clock time, AM/PM marker, and pickup-versus-delivery term exactly.",
   },
   turnDetection: {
-    type: "semantic_vad" as const,
-    eagerness: "low" as const,
+    // SIP call acceptance rejects custom VAD thresholds/timers. Default
+    // server VAD gives telephone turns a deterministic silence boundary;
+    // low-eagerness semantic VAD can hold noisy phone audio open too long.
+    type: "server_vad" as const,
     createResponse: true,
     interruptResponse: true,
   },

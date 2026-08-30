@@ -690,9 +690,7 @@ export class OrderMarketService {
     const normalizedCarrier = evidence.carrierName?.trim() ? normalizeLocation(evidence.carrierName) : null;
     const normalizedOrigin = evidence.origin?.trim() ? normalizeLocation(evidence.origin) : null;
     const normalizedDestination = evidence.destination?.trim() ? normalizeLocation(evidence.destination) : null;
-    let matching = rows.filter((row) => {
-      if (call.contactId && String(row.carrier_id) !== call.contactId) return false;
-      if (!call.contactId && normalizedCarrier && normalizeLocation(String(row.carrier_label)) !== normalizedCarrier) return false;
+    const baseMatches = rows.filter((row) => {
       if (normalizedReference && normalizeOrderReference(String(row.reference || row.name)) !== normalizedReference) return false;
       if (normalizedOrigin && normalizeLocation(String(row.origin)) !== normalizedOrigin) return false;
       if (normalizedDestination && normalizeLocation(String(row.destination)) !== normalizedDestination) return false;
@@ -701,20 +699,30 @@ export class OrderMarketService {
       }
       return true;
     });
-    const identitySufficient = Boolean(call.contactId || normalizedCarrier);
-    if (!identitySufficient || (!normalizedReference && !call.contactId)) matching = [];
-    if (matching.length > 1) {
-      const orderIds = new Set(matching.map((row) => String(row.order_id)));
-      if (orderIds.size === 1) matching = [matching[0]!];
+    let matching = baseMatches;
+    if (normalizedCarrier) {
+      matching = matching.filter((row) => normalizeLocation(String(row.carrier_label)) === normalizedCarrier);
+    } else if (call.contactId) {
+      const callerIdMatches = matching.filter((row) => String(row.carrier_id) === call.contactId);
+      if (callerIdMatches.length > 0) matching = callerIdMatches;
     }
-    const candidates = matching.map((row) => ({ marketId: String(row.market_id), orderReference: String(row.reference || row.name) }));
+    const candidateRows = matching.length > 0 ? matching : baseMatches;
+    const candidates = [...new Map(candidateRows.map((row) => [String(row.market_id), {
+      marketId: String(row.market_id),
+      orderReference: String(row.reference || row.name),
+    }])).values()];
     if (matching.length !== 1) {
-      const attempts = Number((this.db.prepare(`UPDATE calls SET identification_attempts = identification_attempts + 1,
-        updated_at = ? WHERE id = ? RETURNING identification_attempts`).get(new Date().toISOString(), callId) as Row | undefined)?.identification_attempts || 1);
+      const hasEvidence = Boolean(normalizedReference || normalizedCarrier || normalizedOrigin || normalizedDestination);
+      const attempts = hasEvidence
+        ? Number((this.db.prepare(`UPDATE calls SET identification_attempts = identification_attempts + 1,
+            updated_at = ? WHERE id = ? RETURNING identification_attempts`).get(new Date().toISOString(), callId) as Row | undefined)?.identification_attempts || 1)
+        : 0;
+      const distinctOrders = new Set(baseMatches.map((row) => String(row.order_id)));
       const suggestedQuestion = !normalizedReference ? "Ask for the order/reference number."
-        : !identitySufficient ? "Ask for the carrier company name."
-          : !normalizedOrigin ? "Ask for the pickup city."
-            : !normalizedDestination ? "Ask for the destination city." : null;
+        : baseMatches.length === 0 ? "Ask the caller to repeat the order/reference number."
+          : distinctOrders.size > 1 && !normalizedOrigin ? "Ask for the pickup city."
+            : !normalizedCarrier || matching.length === 0 ? "Ask for the carrier company name."
+              : !normalizedDestination ? "Ask for the destination city." : null;
       return {
         status: matching.length > 1 ? "AMBIGUOUS" : "NOT_FOUND",
         marketId: null,

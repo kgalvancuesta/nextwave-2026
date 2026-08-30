@@ -127,4 +127,35 @@ describe("commitment gate", () => {
     expect(snapshot.calls[0]?.id).toBe(webhookResult.callId);
     expect(snapshot.events.some((event) => event.type === "agent.rebriefed")).toBe(true);
   });
+
+  it("denies premature intake escalation and permits it only after three failed matches", async () => {
+    const { runtime, service } = createHarness();
+    await service.handleOpenAiWebhook({
+      type: "realtime.call.incoming",
+      data: { call_id: "rtc_intake_retry", sip_headers: [{ name: "From", value: "+12025550134" }] },
+    });
+    runtime.emitCarrierTranscript("The order number is one one one four.");
+
+    const premature = await runtime.invokeTool!("request_human_escalation", {
+      reason: "Recording metadata is unavailable",
+    }) as { ok: boolean; escalated: boolean; error: string };
+    expect(premature).toMatchObject({ ok: false, escalated: false, error: "identification_incomplete" });
+    expect(runtime.transfers).toHaveLength(0);
+
+    const identifyArgs = {
+      external_reference: "missing-order",
+      carrier_name: null,
+      caller_name: null,
+      origin: null,
+      destination: null,
+    };
+    expect(await runtime.invokeTool!("identify_operation", identifyArgs)).toMatchObject({ escalate: false, attempts: 1 });
+    expect(await runtime.invokeTool!("identify_operation", identifyArgs)).toMatchObject({ escalate: false, attempts: 2 });
+    expect(await runtime.invokeTool!("identify_operation", identifyArgs)).toMatchObject({ escalate: true, attempts: 3 });
+
+    const allowed = await runtime.invokeTool!("request_human_escalation", {
+      reason: "Three order matching attempts failed",
+    }) as { ok: boolean; escalated: boolean; transferred: boolean };
+    expect(allowed).toMatchObject({ ok: true, escalated: true, transferred: true });
+  });
 });

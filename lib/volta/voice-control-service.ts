@@ -50,6 +50,7 @@ const incomingEventSchema = z.object({
 export class VoiceControlService {
   private readonly sessions = new Map<string, AgentCallSession>();
   private readonly latestCarrierTurns = new Map<string, { itemId: string | null; transcript: string }>();
+  private readonly identificationFailures = new Map<string, number>();
 
   constructor(
     private readonly store: StateStore,
@@ -353,7 +354,10 @@ export class VoiceControlService {
     const call = this.requireCall(callId);
 
     if (name === "identify_operation") {
-      if (call.operationId) return { ok: true, operation_id: call.operationId, already_attached: true };
+      if (call.operationId) {
+        this.identificationFailures.delete(call.id);
+        return { ok: true, operation_id: call.operationId, already_attached: true };
+      }
       const reference = z.string().min(1).parse(args.external_reference);
       const procurement = this.procurement?.identifyCall(call.id, reference, {
         carrierName: nullableAgentString(args.carrier_name),
@@ -362,11 +366,26 @@ export class VoiceControlService {
         destination: nullableAgentString(args.destination),
       });
       if (procurement?.attached) {
+        this.identificationFailures.delete(call.id);
         await this.refreshCallProfile(call.id);
         return { ok: true, procurement_market_attached: true, attachment: procurement.result };
       }
+      const procurementResult = objectResult(procurement?.result);
+      const candidates = Array.isArray(procurementResult.candidates) ? procurementResult.candidates : [];
+      if (procurementResult.status === "AMBIGUOUS" || candidates.length > 0) {
+        return this.failedIdentification(call.id, {
+          ...procurementResult,
+          error: "procurement_identity_incomplete",
+        });
+      }
       const operation = this.store.findOperationByReference(reference);
-      if (!operation) return { ok: false, error: "operation_not_found", escalate: true };
+      if (!operation) {
+        return this.failedIdentification(call.id, {
+          error: "operation_not_found",
+          suggestedQuestion: procurementResult.suggestedQuestion ?? "Ask the caller to repeat the order/reference number.",
+        });
+      }
+      this.identificationFailures.delete(call.id);
       this.store.attachCallToOperation(call.id, operation.id);
       this.store.appendEvent(call.id, "operation.identified", { operationId: operation.id, reference });
       // The call just earned a wider tool surface, so re-brief the live agent.
@@ -458,6 +477,22 @@ export class VoiceControlService {
 
     if (name === "request_human_escalation") {
       const reason = z.string().min(1).parse(args.reason);
+      const unidentified = !call.operationId && !this.procurement?.getProfile(call.id);
+      const latestTranscript = this.latestCarrierTurns.get(call.id)?.transcript ?? "";
+      if (unidentified
+        && (this.identificationFailures.get(call.id) ?? 0) < 3
+        && !explicitlyRequestsHuman(latestTranscript)) {
+        this.store.appendEvent(call.id, "escalation.denied_during_identification", {
+          reason,
+          identificationFailures: this.identificationFailures.get(call.id) ?? 0,
+        });
+        return {
+          ok: false,
+          escalated: false,
+          error: "identification_incomplete",
+          instruction: "Do not mention a human. Call identify_operation with the stated order reference, or ask only its suggested follow-up question.",
+        };
+      }
       // The escalation is a policy decision, and it succeeds the moment the
       // server records it: the lane is paused and the market moves to human
       // review whether or not a live transfer is possible. Only the delivery
@@ -588,6 +623,19 @@ export class VoiceControlService {
     this.sessions.get(callId)?.close();
     this.sessions.delete(callId);
     this.latestCarrierTurns.delete(callId);
+    this.identificationFailures.delete(callId);
+  }
+
+  private failedIdentification(callId: string, result: Record<string, unknown>): Record<string, unknown> {
+    const attempts = (this.identificationFailures.get(callId) ?? 0) + 1;
+    this.identificationFailures.set(callId, attempts);
+    return {
+      ...result,
+      ok: false,
+      attempts,
+      shouldEscalate: attempts >= 3,
+      escalate: attempts >= 3,
+    };
   }
 
   private async handleAwardClosing(callId: string, result: unknown): Promise<unknown> {
@@ -723,6 +771,13 @@ function carrierTurnEvidence(
     itemId: typeof candidate.itemId === "string" && candidate.itemId.trim() ? candidate.itemId : null,
     transcript: candidate.transcript.trim(),
   };
+}
+
+function explicitlyRequestsHuman(transcript: string): boolean {
+  const normalized = transcript.toLowerCase();
+  const person = /\b(human|person|representative|operator|supervisor|humano|persona|asesor|operador|supervisor)\b/u.test(normalized);
+  const request = /\b(speak|talk|connect|transfer|want|need|hablar|comunica|comunicar|pasa|pasar|quiero|necesito)\b/u.test(normalized);
+  return person && request;
 }
 
 /** The market revision a procurement escalation left behind, when there is one. */

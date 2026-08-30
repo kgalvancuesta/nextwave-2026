@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { handleInboundCall } from "@/lib/call-service";
 import { normalizePhoneNumber } from "@/lib/phone";
 import { INBOUND_INTERIM_MESSAGE, PlaceholderVoiceSessionAdapter } from "@/lib/voice-session";
-import { createTestRepository } from "./helpers";
+import { VoltaStore } from "@/lib/volta/store";
+import { createTestContext, createTestRepository } from "./helpers";
 
 describe("incoming calls", () => {
   it("persists the call and returns Nextwave interim TwiML", async () => {
@@ -30,7 +31,7 @@ describe("incoming calls", () => {
   });
 
   it("resolves a known caller from equivalent supported phone formatting", async () => {
-    const repository = createTestRepository();
+    const { db, repository } = createTestContext();
     const contact = repository.createContact({
       label: "Kevin",
       phoneInput: "5500000008",
@@ -59,6 +60,7 @@ describe("incoming calls", () => {
       contactLabel: "Kevin",
       fromNumber: "+525500000008",
     });
+    expect(new VoltaStore(db).getCall(result.call.id)?.counterparty).toBe("Kevin");
   });
 
   it("keeps an unknown caller's raw number as the display fallback", async () => {

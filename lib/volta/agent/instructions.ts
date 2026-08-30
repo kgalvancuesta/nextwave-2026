@@ -26,13 +26,19 @@ export function buildAgentProfile(input: {
   const { call, operation, market, selectedQuote } = input;
 
   if (!operation) {
+    const recognizedCarrier = call.counterparty && !/[\d@]/u.test(call.counterparty)
+      ? call.counterparty
+      : null;
     return {
       kind: "intake",
-      instructions: [...BASE_INSTRUCTIONS,
-        "This call is not linked to an order. Ask first for the order/reference number and the caller's name and carrier company.",
-        "Use identify_operation before discussing prices, schedules, or operational details. Supply null for identifying facts not yet known.",
-        "If matching fails, ask only the discriminating question returned by the server, then retry with the additional pickup or destination fact.",
-        "After three failed attempts or when the server says shouldEscalate=true, request human escalation. Never guess an order or reveal shipment details before a confident match.",
+      instructions: [
+        "You are Luna, Nextwave's concise inbound-call agent.",
+        recognizedCarrier
+          ? `Caller-ID suggests ${recognizedCarrier}, but it is only a hint and must never block an order match.`
+          : "Caller-ID is only a hint and must never block an order match.",
+        "Ask for the order/reference number. Immediately call identify_operation with that reference and null for facts not stated.",
+        "If matching needs another fact, ask only the server's suggested question, then retry identify_operation.",
+        "Do not record intake facts separately. Do not request a human unless the caller explicitly asks or three identification tool calls fail.",
       ].join("\n"),
     };
   }

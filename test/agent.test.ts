@@ -77,7 +77,6 @@ describe("volta agent", () => {
   it("bounds each call kind by its tool surface, not by its prompt", () => {
     expect(toolNames("intake")).toEqual([
       "identify_operation",
-      "record_brief_item",
       "request_human_escalation",
     ]);
     expect(toolNames("carrier_quote")).toEqual([
@@ -212,8 +211,18 @@ describe("volta agent", () => {
       selectedQuote: null,
     });
     expect(intake.kind).toBe("intake");
-    expect(intake.instructions).toContain("Use identify_operation");
+    expect(intake.instructions).toContain("Immediately call identify_operation");
     expect(intake.instructions).not.toContain("Mandate JSON");
+
+    const recognizedIntake = buildAgentProfile({
+      call: { counterparty: "MexPost" },
+      operation: null,
+      market: null,
+      selectedQuote: null,
+    });
+    expect(recognizedIntake.instructions).toContain("Caller-ID suggests MexPost");
+    expect(recognizedIntake.instructions).toContain("Ask for the order/reference number");
+    expect(recognizedIntake.instructions).toContain("must never block an order match");
 
     const winner = buildAgentProfile({
       call: { counterparty: "Drayage Occidente" },

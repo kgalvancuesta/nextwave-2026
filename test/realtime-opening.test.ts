@@ -6,7 +6,7 @@ import { createVoltaAgent } from "@/lib/volta/agent/volta-agent";
 describe("Realtime opening response", () => {
   afterEach(() => vi.useRealTimers());
 
-  it("uses SIP-compatible noise reduction with low-eagerness interruption", () => {
+  it("uses deterministic SIP-compatible server VAD", () => {
     expect(REALTIME_INPUT_AUDIO_CONFIG).toMatchObject({
       noiseReduction: { type: "far_field" },
       transcription: {
@@ -14,8 +14,7 @@ describe("Realtime opening response", () => {
         languages: ["en", "es"],
       },
       turnDetection: {
-        type: "semantic_vad",
-        eagerness: "low",
+        type: "server_vad",
         createResponse: true,
         interruptResponse: true,
       },
@@ -30,10 +29,11 @@ describe("Realtime opening response", () => {
     });
 
     expect(payload.audio?.input?.turn_detection).toMatchObject({
-      type: "semantic_vad",
-      eagerness: "low",
+      type: "server_vad",
       interrupt_response: true,
     });
+    expect(payload.audio?.input?.turn_detection).not.toHaveProperty("threshold");
+    expect(payload.audio?.input?.turn_detection).not.toHaveProperty("silence_duration_ms");
     expect(payload.audio?.input?.transcription).toMatchObject({
       model: "gpt-transcribe",
       languages: ["en", "es"],

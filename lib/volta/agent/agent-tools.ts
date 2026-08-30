@@ -103,10 +103,10 @@ const finishProcurementArgs = z.object({
 
 const identifyOperation = tool<typeof identifyOperationArgs, ToolContext, string>({
   name: "identify_operation",
-  description: "Attempt to match an inbound caller to an order using the reference, caller/carrier identity, and any route facts collected. Supply null for unknown evidence and follow the server's suggested next question.",
+  description: "Match an inbound call by order reference. Caller-ID is only a hint. Supply null for unstated facts and follow the server's suggested question.",
   parameters: identifyOperationArgs,
   execute: (input, runContext) => invoke(runContext, "identify_operation", input),
-  errorFunction: toolFailure,
+  errorFunction: identificationToolFailure,
 });
 
 const recordBriefItem = tool<typeof briefItemArgs, ToolContext, string>({
@@ -182,7 +182,7 @@ const finishProcurementCall = tool<typeof finishProcurementArgs, ToolContext, st
 export function toolsForKind(kind: VoltaCallKind) {
   switch (kind) {
     case "intake":
-      return [identifyOperation, recordBriefItem, requestHumanEscalation];
+      return [identifyOperation, requestHumanEscalation];
     case "carrier_quote":
       return [recordBriefItem, recordCarrierQuote, requestHumanEscalation];
     case "procurement":
@@ -211,6 +211,15 @@ function toolFailure(_runContext: RunContext<ToolContext>, error: unknown): stri
     ok: false,
     error: error instanceof Error ? error.message : String(error),
     escalate: true,
+  });
+}
+
+function identificationToolFailure(_runContext: RunContext<ToolContext>, error: unknown): string {
+  return JSON.stringify({
+    ok: false,
+    error: error instanceof Error ? error.message : String(error),
+    escalate: false,
+    instruction: "Retry identify_operation with the order reference and null for every unstated fact.",
   });
 }
 

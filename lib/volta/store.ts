@@ -229,12 +229,18 @@ export class VoltaStore implements StateStore {
   }
 
   getCall(id: string): CallRecord | null {
-    const row = this.db.prepare("SELECT * FROM calls WHERE id = ?").get(id) as Row | undefined;
+    const row = this.db.prepare(`SELECT calls.*, contacts.label AS resolved_counterparty
+      FROM calls LEFT JOIN contacts ON contacts.id = calls.contact_id OR (
+        calls.contact_id IS NULL AND calls.direction = 'INBOUND' AND contacts.e164_phone_number = calls.from_number
+      ) WHERE calls.id = ?`).get(id) as Row | undefined;
     return row ? toCall(row) : null;
   }
 
   findCallByRealtimeId(realtimeCallId: string): CallRecord | null {
-    const row = this.db.prepare("SELECT * FROM calls WHERE realtime_call_id = ?").get(realtimeCallId) as Row | undefined;
+    const row = this.db.prepare(`SELECT calls.*, contacts.label AS resolved_counterparty
+      FROM calls LEFT JOIN contacts ON contacts.id = calls.contact_id OR (
+        calls.contact_id IS NULL AND calls.direction = 'INBOUND' AND contacts.e164_phone_number = calls.from_number
+      ) WHERE calls.realtime_call_id = ?`).get(realtimeCallId) as Row | undefined;
     return row ? toCall(row) : null;
   }
 
@@ -385,7 +391,7 @@ function toCall(row: Row): CallRecord {
     operationId: nullableString(row.volta_operation_id),
     marketId: nullableString(row.volta_market_id),
     direction: String(row.direction) === "INBOUND" ? "inbound" : "outbound",
-    counterparty: nullableString(row.volta_counterparty),
+    counterparty: nullableString(row.volta_counterparty ?? row.resolved_counterparty),
     fromNumber: String(row.from_number),
     toNumber: String(row.to_number),
     status: row.volta_status === null || row.volta_status === undefined

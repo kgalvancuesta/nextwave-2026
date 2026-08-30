@@ -179,10 +179,44 @@ describe("self-healing orders", () => {
       rawPayload: {},
     });
     const miss = markets.matchInboundCall(unknown.id, { reference: "wrong", carrierName: carriers[0]!.label });
-    expect(miss).toMatchObject({ status: "NOT_FOUND", suggestedQuestion: "Ask for the pickup city.", shouldEscalate: false });
+    expect(miss).toMatchObject({ status: "NOT_FOUND", suggestedQuestion: "Ask the caller to repeat the order/reference number.", shouldEscalate: false });
     const matched = markets.matchInboundCall(unknown.id, { reference: "1842", carrierName: carriers[0]!.label });
     expect(matched.status).toBe("CLOSED");
     expect(repository.getCall(unknown.id)).toMatchObject({ carrierId: carriers[0]!.id });
+  });
+
+  it("uses caller ID only as a hint and matches the stated order after asking for carrier", () => {
+    const { markets, repository, carriers } = bookedMarket();
+    const unrelated = repository.createContact({
+      label: "Unrelated caller ID",
+      phoneInput: "+12025550108",
+      e164PhoneNumber: "+12025550108",
+    });
+    const inbound = repository.upsertInboundCall({
+      twilioCallSid: "CA_unrelated_caller_id",
+      fromNumber: unrelated.e164PhoneNumber,
+      toNumber: "+12025550101",
+      contactId: unrelated.id,
+      status: "IN_PROGRESS",
+      rawPayload: {},
+    });
+
+    const needsCarrier = markets.matchInboundCall(inbound.id, { reference: "1842" });
+    expect(needsCarrier).toMatchObject({
+      status: "AMBIGUOUS",
+      suggestedQuestion: "Ask for the carrier company name.",
+      shouldEscalate: false,
+    });
+
+    const matched = markets.matchInboundCall(inbound.id, {
+      reference: "1842",
+      carrierName: carriers[1]!.label,
+    });
+    expect(matched.status).toBe("CLOSED");
+    expect(repository.getCall(inbound.id)).toMatchObject({
+      carrierId: carriers[1]!.id,
+      marketId: matched.marketId,
+    });
   });
 
   it("automatically selects a historically successful exact-lane carrier", () => {
