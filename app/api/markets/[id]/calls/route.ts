@@ -4,6 +4,7 @@ import { apiError } from "@/lib/http";
 import { getOrderMarketService } from "@/lib/market-service";
 import { getRepository } from "@/lib/repository";
 import { TwilioTelephonyProvider } from "@/lib/telephony";
+import { assertVoiceReady } from "@/lib/voice-readiness";
 
 export const runtime = "nodejs";
 
@@ -14,6 +15,7 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
     const market = service.getMarket(id);
     if (!market) return Response.json({ error: "Market not found." }, { status: 404 });
     const config = loadTelephonyConfig();
+    await assertVoiceReady();
     const started = service.startMarket(id);
     const result = await initiateOutboundBatch({
       contactIds: started.carrierIds,

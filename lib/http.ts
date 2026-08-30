@@ -28,7 +28,7 @@ export function apiError(error: unknown): Response {
   if (/market|offer|carrier|commitment|price|weight|mandate|invalidation reason|required before/i.test(message)) {
     return Response.json({ error: message }, { status: 400 });
   }
-  if (/Missing Twilio|Missing OpenAI|PUBLIC_BASE_URL|forbidden in production/i.test(message)) {
+  if (/Missing Twilio|Missing OpenAI|PUBLIC_BASE_URL|Voice system is not ready|forbidden in production/i.test(message)) {
     return Response.json({ error: message }, { status: 503 });
   }
   if (/no such table/i.test(message)) {

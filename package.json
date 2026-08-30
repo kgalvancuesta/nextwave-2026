@@ -14,7 +14,9 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "db:migrate": "tsx scripts/migrate.ts",
-    "twilio:configure": "tsx scripts/twilio-configure.ts"
+    "twilio:configure": "tsx scripts/twilio-configure.ts",
+    "demo:check": "tsx scripts/demo-check.ts",
+    "demo:start": "tsx scripts/demo-start.ts"
   },
   "dependencies": {
     "@openai/agents": "0.17.0",

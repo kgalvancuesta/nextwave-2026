@@ -4,6 +4,7 @@ import { loadTelephonyConfig } from "@/lib/config";
 import { apiError } from "@/lib/http";
 import { getRepository } from "@/lib/repository";
 import { TwilioTelephonyProvider } from "@/lib/telephony";
+import { assertVoiceReady } from "@/lib/voice-readiness";
 
 export const runtime = "nodejs";
 
@@ -13,6 +14,7 @@ export async function POST(request: Request) {
   try {
     const body = requestSchema.parse(await request.json());
     const config = loadTelephonyConfig();
+    await assertVoiceReady();
     const result = await initiateOutboundBatch({
       contactIds: body.contactIds,
       fromNumber: config.phoneNumber,

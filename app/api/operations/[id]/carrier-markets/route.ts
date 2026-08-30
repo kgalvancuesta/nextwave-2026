@@ -2,6 +2,7 @@ import { z } from "zod";
 import { apiError } from "@/lib/http";
 import { normalizePhoneNumber } from "@/lib/phone";
 import { getVoiceControlService } from "@/lib/volta/service";
+import { assertVoiceReady } from "@/lib/voice-readiness";
 
 export const runtime = "nodejs";
 
@@ -17,6 +18,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   try {
     const { id } = await params;
     const body = requestSchema.parse(await request.json());
+    await assertVoiceReady();
     const result = await getVoiceControlService().startCarrierMarket(id, body.candidates.map((candidate) => ({
       name: candidate.name,
       phone: normalizePhoneNumber(candidate.phoneNumber),

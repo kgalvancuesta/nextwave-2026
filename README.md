@@ -117,7 +117,7 @@ Every significant design decision, the alternative we rejected, and why, is in
 
 ## 1. Install and initialize
 
-Requirements: Node.js 22 or newer, npm, a Twilio account, a voice-capable Twilio phone number, and ngrok or another HTTPS tunnel.
+Requirements: Node.js 22 or newer, npm, a Twilio account, a voice-capable Twilio phone number, an OpenAI project with Realtime SIP enabled, and a named Cloudflare Tunnel on a stable hostname.
 
 ```bash
 npm install
@@ -137,7 +137,7 @@ fail, and the escalation is still recorded, the lane is still paused, and the
 agent promises a callback and ends the call. A counterparty is never left on an
 open line with an agent that has no authority left.
 
-Start the app:
+For local development without live calls, start the app:
 
 ```bash
 npm run dev
@@ -145,25 +145,78 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000).
 
-## 2. Expose the app
+## 2. Configure the stable voice endpoint
 
-In another terminal:
+Live and demo calls require a stable public hostname. Do not use an ephemeral
+`trycloudflare.com` or ngrok URL: restarting it changes the webhook destination
+and can leave answered callers hearing ringback while the SIP leg times out.
 
-```bash
-ngrok http 3000
-```
-
-Copy the generated HTTPS origin, for example `https://abc123.ngrok.app`, into `.env.local`:
+Create a named Cloudflare Tunnel and route only these paths to
+`http://127.0.0.1:3000`:
 
 ```text
-PUBLIC_BASE_URL=https://abc123.ngrok.app
+^/api/(twilio(?:/|$)|webhooks/openai$|health/live$)
 ```
 
-Set a strong `DASHBOARD_PASSWORD` if you will open Marketline through that public URL. Without one, the dashboard and call-control APIs work on localhost but reject public-tunnel access; Twilio webhook routes remain reachable and signature-protected. Restart `npm run dev` after changing `.env.local`.
+Keep the dashboard on localhost. The restricted route prevents the tunnel from
+publishing the dashboard or unrelated APIs.
 
-Do not use localhost in `PUBLIC_BASE_URL`; Twilio must reach the application over public HTTPS.
+Set the stable endpoint and named-tunnel credentials in `.env.local`:
 
-## 3. Configure the Twilio number
+```text
+PUBLIC_BASE_URL=https://marketline.example.com
+OPENAI_WEBHOOK_URL=https://marketline.example.com/api/webhooks/openai
+CLOUDFLARE_TUNNEL_ID=YOUR_TUNNEL_ID
+CLOUDFLARE_TUNNEL_CREDENTIALS_FILE=./secrets/cloudflare-tunnel-credentials.json
+```
+
+The credentials file belongs under the gitignored `secrets/` directory. In the
+same OpenAI project used by `OPENAI_PROJECT_ID` and `OPENAI_SIP_URI`, configure
+the project webhook URL as:
+
+```text
+https://marketline.example.com/api/webhooks/openai
+```
+
+Subscribe it to `realtime.call.incoming` and copy its signing secret to
+`OPENAI_WEBHOOK_SECRET`.
+
+## 3. Start and verify the complete demo system
+
+Use the central launcher instead of starting the app and tunnel separately:
+
+```bash
+npm run demo:start
+```
+
+It starts Next.js and the named Cloudflare Tunnel, waits for both local and
+public liveness, reapplies and verifies the Twilio number callbacks, and runs
+the voice readiness check. Do not place calls until it prints:
+
+```text
+Marketline demo system is READY.
+```
+
+If either required process exits, the launcher exits too. Press `Ctrl+C` once
+to stop both. To check an already-running system without restarting it:
+
+```bash
+npm run demo:check
+```
+
+Every carrier-dial path runs the same readiness check and returns HTTP 503
+without creating a Twilio call when the system is not ready.
+
+## 4. Twilio number configuration
+
+`npm run demo:start` configures and verifies the number automatically. For a
+manual repair, run:
+
+```bash
+npm run twilio:configure
+```
+
+The expected number configuration is:
 
 In Twilio Console:
 
@@ -171,10 +224,10 @@ In Twilio Console:
 2. Select the phone number stored as `TWILIO_PHONE_NUMBER`.
 3. Under **Voice Configuration**, set **Configure with** to **Webhook**.
 4. Set **A call comes in** to:
-   - URL: `https://YOUR-NGROK-HOST/api/twilio/voice/inbound`
+   - URL: `https://YOUR-STABLE-HOST/api/twilio/voice/inbound`
    - Method: `HTTP POST`
 5. Set **Call Status Changes** to:
-   - URL: `https://YOUR-NGROK-HOST/api/twilio/status`
+   - URL: `https://YOUR-STABLE-HOST/api/twilio/status`
    - Method: `HTTP POST`
 6. Save the number configuration.
 
@@ -188,14 +241,14 @@ Outbound calls configure these callbacks automatically:
 
 Twilio signatures are validated against `PUBLIC_BASE_URL` by default. A rejected callback is logged and returns HTTP 403. `TWILIO_VALIDATE_SIGNATURES=false` exists only for development diagnosis and is rejected when `NODE_ENV=production`.
 
-## 4. Twilio account checks
+## 5. Twilio account checks
 
 - Open **Voice → Settings → Geo Permissions** and enable every destination country needed for the demo.
 - Trial accounts can call only verified recipient numbers. Verify all three test numbers or upgrade the account.
 - Confirm the account has funds and the selected Twilio number has Voice capability.
 - Regulations and geographic permissions can make a valid E.164 number uncallable. Marketline reports the Twilio error separately from phone-number validation.
 
-## 5. Order and market test
+## 6. Order and market test
 
 1. Add up to three carriers. Mexican national-format numbers use `MX` as the default region; international numbers should include `+` and country code.
 2. Create an order with its target, maximum, timing mandate, priority weights, required conditions, minimum feasible-offer count, and selected carriers.

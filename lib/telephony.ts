@@ -2,6 +2,7 @@ import "server-only";
 
 import twilio from "twilio";
 import type { TelephonyConfig } from "./config";
+import { assertVoiceReady } from "./voice-readiness";
 
 export interface CreateCallInput {
   to: string;
@@ -29,6 +30,7 @@ export class TwilioTelephonyProvider implements TelephonyProvider {
   }
 
   async createCall(input: CreateCallInput): Promise<{ callSid: string }> {
+    await assertVoiceReady();
     const recordingUrl = `${this.config.publicBaseUrl}/api/twilio/recording`;
     const call = await this.client.calls.create({
       to: input.to,
@@ -52,6 +54,7 @@ export class TwilioTelephonyProvider implements TelephonyProvider {
   }
 
   async createNotificationCall(input: CreateNotificationCallInput): Promise<{ callSid: string }> {
+    await assertVoiceReady();
     const response = new twilio.twiml.VoiceResponse();
     response.say({ voice: "alice" }, input.message);
     response.hangup();
