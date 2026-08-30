@@ -127,7 +127,7 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
           `After yes, record it and ask exactly: "${quoteQuestion}"`,
           `Send one update with every fact from each meaningful reply. Normalize clearly stated pickup and arrival times to ISO 8601 using the conversation, the immediately preceding question, and procurement timezone ${PROCUREMENT_TIME_ZONE}. A short answer belongs to the field just asked about. If AM/PM or another essential detail is genuinely ambiguous, pass null and ask only that natural clarification. Ask only for missing facts; never repeat recorded facts, formatting instructions, or system narration. If a tool call fails, retry it silently: never mention recording, persistence, storage, tool, server, JSON, schema, formatting, or timestamp-parsing problems to the carrier. If a clearly stated time remains missing, confirm the natural interpretation, for example 'And that's 5 PM for pickup, correct?' To fill a pause say only 'One moment.'`,
           "CONFIRM: recap once and ask if correct; yes locks it. HOLD: finish QUOTE_RECORDED. RELEASE: finish RELEASE. AWARD: stop.",
-          "Never negotiate or counter. The server compares locked quotes and chooses the best feasible one.",
+          "NEGOTIATE: ask once, plainly, 'Is there any room to come down on that price?' Do not name a number, do not push, and do not ask again if they say no. Record whatever they answer with one update and move on. Otherwise never negotiate or counter on your own — the server compares locked quotes and chooses the best feasible one.",
           "If asked to wait, say, 'Sure, take your time,' then wait silently without tools.",
           `Voicemail: finish VOICEMAIL for order ${reference}. Human requested or required: call request_human_escalation.`,
         ].join("\n"),
@@ -238,7 +238,12 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
     // "Let me check" is conversation control, not an offer fact. Treat all
     // content-free tool calls as no-ops so they cannot create a partial offer,
     // advance the market revision, or wake the parallel calls.
-    if (!hasMaterialProcurementUpdate(normalized)) {
+    // A "no" to the lower-price ask carries no commercial facts, but it is the
+    // answer the round exists to collect, so it must reach the market instead
+    // of being swallowed as conversation control. A real stall ("let me check")
+    // is still a no-op either way.
+    const answeringNegotiation = before.instruction.action === "NEGOTIATE" && !pauseRequested;
+    if (!answeringNegotiation && !hasMaterialProcurementUpdate(normalized)) {
       return {
         result: {
           ok: true,
@@ -1085,7 +1090,7 @@ function instructionMessage(action: string): string {
     case "ASK_MISSING_FIELD": return "Ask only for the named missing field, then record the answer immediately.";
     case "CONFIRM": return "Read back the server-recorded price, pickup, arrival, and every required condition once, naming each condition out loud. Ask whether that exact quote and those conditions are correct. Only a clear yes may set firm=true.";
     case "HOLD": return "The quote is complete. Ask whether the carrier prefers to hold briefly or be contacted if selected; never leave them in unexplained silence.";
-    case "NEGOTIATE": return "Use only the returned target and then record the carrier's response.";
+    case "NEGOTIATE": return "Ask once whether they can come down on the price. Do not name a number. Record their answer with one update and do not ask again.";
     case "RELEASE": return "Thank the carrier, close politely, then finish the call using this exact market revision.";
     case "HUMAN_REQUIRED": return "This lane is paused for a human. Do not negotiate further. Either you were transferred, or you must say the callback line and finish this call with disposition HUMAN. The rest of the market keeps running.";
     case "AWARD": return "The carrier has been awarded. The server will play the exact scripted terms, queue the written recap, and end the call without further questions.";

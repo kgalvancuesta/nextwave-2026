@@ -391,6 +391,7 @@ function instructionReasonLabel(instruction: MarketCarrierState["instruction"]):
     partial_offer_call_ended: "Call ended with an incomplete quote",
     nondominated_offer_waiting_for_market: "Still competitive - held while other lanes finish",
     frontier_negotiation_complete: "Best terms reached - holding for the decision",
+    ask_for_lower_price: "Asking once if they can come down on price",
     improve_price_on_frontier: instruction.targetPrice === null
       ? "Countering for a better price"
       : `Countering at ${instruction.targetPrice}`,

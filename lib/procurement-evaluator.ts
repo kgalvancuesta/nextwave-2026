@@ -208,6 +208,7 @@ export function evaluateMarket(input: MarketEvaluationInput): MarketEvaluation {
     return result("CLOSED", false, null, null);
   }
 
+  let negotiationPending = false;
   for (const carrier of input.carriers) {
     const offer = byCarrier.get(carrier.carrierId) ?? null;
     if (carrier.humanReason || offer?.humanRequired) {
@@ -250,6 +251,16 @@ export function evaluateMarket(input: MarketEvaluationInput): MarketEvaluation {
       actions[carrier.carrierId] = instruction("RELEASE", "pareto_dominated", input.revision);
       continue;
     }
+    // One plain "can you go lower?" the moment a quote is locked, to whoever
+    // is on the line. No server-computed target: the model asks, the carrier
+    // answers, the answer is recorded, and the round is spent. The server
+    // increments negotiation_rounds when it persists a NEGOTIATE action, so a
+    // re-evaluation can never ask twice.
+    if (carrier.callActive && carrier.negotiationRounds < 1 && !timedOut) {
+      actions[carrier.carrierId] = { ...instruction("NEGOTIATE", "ask_for_lower_price", input.revision), field: "price" };
+      negotiationPending = true;
+      continue;
+    }
     if (!discoveryComplete) {
       actions[carrier.carrierId] = instruction("HOLD", "nondominated_offer_waiting_for_market", input.revision);
       continue;
@@ -259,7 +270,7 @@ export function evaluateMarket(input: MarketEvaluationInput): MarketEvaluation {
 
   const humanActive = input.carriers.some((carrier) => carrier.humanReason || byCarrier.get(carrier.carrierId)?.humanRequired);
   const enoughOffers = feasibleComparable.length >= input.mandate.minimumValidOffers || (discoveryComplete && feasibleComparable.length > 0);
-  const awardReady = input.automaticAward && discoveryComplete && enoughOffers && !humanActive;
+  const awardReady = input.automaticAward && discoveryComplete && enoughOffers && !negotiationPending && !humanActive;
   const awardOfferId = awardReady ? ranked[0]?.id ?? null : null;
 
   if (awardOfferId) {
