@@ -16,7 +16,8 @@
     "db:migrate": "tsx scripts/migrate.ts",
     "twilio:configure": "tsx scripts/twilio-configure.ts",
     "demo:check": "tsx scripts/demo-check.ts",
-    "demo:start": "tsx scripts/demo-start.ts"
+    "demo:start": "tsx scripts/demo-start.ts",
+    "demo:seed": "tsx --conditions=react-server scripts/demo-seed.ts"
   },
   "dependencies": {
     "@openai/agents": "0.17.0",
@@ -39,6 +40,7 @@
     "@types/react-dom": "19.2.5",
     "eslint": "9.39.5",
     "eslint-config-next": "16.3.3",
+    "server-only": "^0.0.1",
     "tailwindcss": "4.3.3",
     "tsx": "4.23.12",
     "typescript": "6.0.3",
