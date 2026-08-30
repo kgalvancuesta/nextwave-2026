@@ -69,9 +69,12 @@ const procurementUpdateArgs = z.object({
   availability: z.enum(["UNKNOWN", "AVAILABLE", "UNAVAILABLE"]),
   price: z.number().int().nonnegative().nullable(),
   currency: z.string().length(3).nullable(),
-  rateAllIn: z.boolean().nullable(),
-  pickupTime: z.string().nullable().describe("ISO 8601 pickup time interpreted from the carrier's words using the current conversation, immediately preceding question, and configured procurement timezone. Use null when genuinely ambiguous; never invent missing details."),
-  expectedArrival: z.string().nullable().describe("ISO 8601 destination arrival time interpreted from the carrier's words using the current conversation, immediately preceding question, and configured procurement timezone. Use null when genuinely ambiguous; never invent missing details."),
+  // Named so it cannot be misread as "the all-in rate": the Realtime model kept
+  // putting the price here, which failed validation on every priced turn.
+  priceIsAllIn: z.boolean().nullable()
+    .describe("true only if the carrier said the price includes everything (all-in). Never a number; the price goes in `price`."),
+  pickupTime: z.string().nullable().describe("Pickup time the carrier stated, or null."),
+  expectedArrival: z.string().nullable().describe("Destination arrival time the carrier stated, or null."),
   firm: z.boolean().nullable().describe("Server-owned quote state. Always pass null."),
   expiresAt: z.string().nullable().describe("ISO 8601 when known; otherwise the carrier's exact relative phrase."),
   accessorials: z.array(z.string()),
@@ -238,7 +241,8 @@ function withoutNulls<T extends Record<string, unknown>>(value: T): Record<strin
 }
 
 function procurementPatch(value: z.infer<typeof procurementUpdateArgs>): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(value).filter(([key, entry]) => {
+  const { priceIsAllIn, ...rest } = value;
+  return Object.fromEntries(Object.entries({ ...rest, rateAllIn: priceIsAllIn }).filter(([key, entry]) => {
     if (entry === null) return false;
     if (Array.isArray(entry) && entry.length === 0) return false;
     if (key === "availability" && entry === "UNKNOWN") return false;
