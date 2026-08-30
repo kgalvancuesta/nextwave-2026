@@ -1667,6 +1667,8 @@ function mandateFromInput(input: CreateOrderInput, conditions: string[]): Mandat
     desiredCarriers: input.desiredCarriers,
     conditions,
     currency,
+    freeTimeEndsAt: nullableDate(input.freeTimeEndsAt),
+    dailyDemurrageRate: input.dailyDemurrageRate || 0,
     exchangeRates: normalizeExchangeRates(currency, input.exchangeRates),
     exchangeRateSource: input.exchangeRateSource?.trim()
       || (input.exchangeRates ? "Operator-configured order rate" : defaultExchangeRateSource(currency)),
@@ -1674,8 +1676,8 @@ function mandateFromInput(input: CreateOrderInput, conditions: string[]): Mandat
 }
 
 function mandateFromOrder(order: OrderRecord): MandateSnapshot {
-  const { targetPrice, maximumPrice, preferredPickup, mustPickupBy, preferredArrival, mustArriveBy, priceWeight, speedWeight, minimumValidOffers, desiredCarriers, conditions, currency, exchangeRates, exchangeRateSource } = order;
-  return { targetPrice, maximumPrice, preferredPickup, mustPickupBy, preferredArrival, mustArriveBy, priceWeight, speedWeight, minimumValidOffers, desiredCarriers, conditions, currency, exchangeRates, exchangeRateSource };
+  const { targetPrice, maximumPrice, preferredPickup, mustPickupBy, preferredArrival, mustArriveBy, priceWeight, speedWeight, minimumValidOffers, desiredCarriers, conditions, currency, freeTimeEndsAt, dailyDemurrageRate, exchangeRates, exchangeRateSource } = order;
+  return { targetPrice, maximumPrice, preferredPickup, mustPickupBy, preferredArrival, mustArriveBy, priceWeight, speedWeight, minimumValidOffers, desiredCarriers, conditions, currency, freeTimeEndsAt, dailyDemurrageRate, exchangeRates, exchangeRateSource };
 }
 
 function toMarket(row: Row): MarketRecord {
@@ -1901,6 +1903,9 @@ function normalizeMandate(raw: Partial<MandateSnapshot> & Pick<MandateSnapshot, 
     currency,
     preferredPickup: raw.preferredPickup ?? null,
     mustPickupBy: raw.mustPickupBy ?? null,
+    // Mandates persisted before demurrage entered ranking have neither field.
+    freeTimeEndsAt: raw.freeTimeEndsAt ?? null,
+    dailyDemurrageRate: raw.dailyDemurrageRate ?? 0,
     exchangeRates: normalizeExchangeRates(currency, raw.exchangeRates),
     exchangeRateSource: raw.exchangeRateSource ?? defaultExchangeRateSource(currency),
   } as MandateSnapshot;

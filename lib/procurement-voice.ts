@@ -203,7 +203,12 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
     // field must never toggle a quote between confirmed and unconfirmed.
     delete normalized.firm;
     if (normalized.availability === "AVAILABLE" && isClearAffirmative(transcript)) {
-      normalized.confirmedRequirements = before.market.mandate.conditions;
+      // The opening message reads every condition aloud and asks whether the
+      // carrier can meet them, so an unqualified yes answers that question --
+      // but it can never revive a condition the carrier has explicitly
+      // refused, and the CONFIRM recap names them again before firm=true.
+      const rejected = new Set((normalized.rejectedRequirements ?? before.latestOffer?.rejectedRequirements ?? []).map(normalizeText));
+      normalized.confirmedRequirements = before.market.mandate.conditions.filter((condition) => !rejected.has(normalizeText(condition)));
     }
     if (normalized.price !== undefined && normalized.price !== null && normalized.rateAllIn === undefined) {
       // The normal sourcing prompt asks specifically for the all-in price, so
@@ -846,7 +851,16 @@ function normalizeText(value: string): string {
 
 function isClearAffirmative(value: string): boolean {
   const normalized = normalizeText(value).replace(/[^\p{Letter}\p{Number}\s]/gu, "").replace(/\s+/g, " ").trim();
-  return /^(?:yes|yeah|yep|correct|si|correcto|de acuerdo|asi es)$/.test(normalized);
+  // A qualifier anywhere in the turn means the carrier is not agreeing outright
+  // ("yes, but the driver is not named yet"), so it can never be a confirmation.
+  if (/\b(?:but|however|except|unless|pero|excepto|salvo|aunque|solo que)\b/.test(normalized)) return false;
+  // Bare "si" is ambiguous in Spanish -- it is also "if" -- so it only counts
+  // alone or leading another affirmative, never as a prefix of a conditional
+  // like "si llego tarde".
+  if (/^si(?: (?:correcto|claro|asi es|eso es|exacto|confirmado|senor|senora|es correcto|esta bien|de acuerdo))?$/.test(normalized)) return true;
+  // Everything else matches a prefix, not the whole turn: "yes, that's correct"
+  // is unqualified agreement and must not fall through to PARTIAL.
+  return /^(?:yes|yeah|yep|yup|sure|correct|confirmed|confirm|thats? (?:correct|right)|that is (?:correct|right)|claro|correcto|de acuerdo|asi es|eso es|exacto|confirmado)\b/.test(normalized);
 }
 
 function isCarrierPauseRequest(value: string): boolean {
@@ -1052,7 +1066,7 @@ function parseRelativeAmount(value: string): number {
 function instructionMessage(action: string): string {
   switch (action) {
     case "ASK_MISSING_FIELD": return "Ask only for the named missing field, then record the answer immediately.";
-    case "CONFIRM": return "Read back the server-recorded price, pickup, and arrival once. Ask whether that exact quote is correct. Only a clear yes may set firm=true.";
+    case "CONFIRM": return "Read back the server-recorded price, pickup, arrival, and every required condition once, naming each condition out loud. Ask whether that exact quote and those conditions are correct. Only a clear yes may set firm=true.";
     case "HOLD": return "The quote is complete. Ask whether the carrier prefers to hold briefly or be contacted if selected; never leave them in unexplained silence.";
     case "NEGOTIATE": return "Use only the returned target and then record the carrier's response.";
     case "RELEASE": return "Thank the carrier, close politely, then finish the call using this exact market revision.";

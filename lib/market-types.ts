@@ -51,6 +51,13 @@ export interface MandateSnapshot {
   desiredCarriers: number;
   conditions: string[];
   currency: string;
+  /**
+   * Demurrage exposure, carried on the mandate so ranking can price a late
+   * arrival in money instead of treating hours as a pure preference. An
+   * arrival inside the free time costs nothing no matter how much later it is.
+   */
+  freeTimeEndsAt: string | null;
+  dailyDemurrageRate: number;
   /** Units of the mandate currency for one unit of each quoted currency. */
   exchangeRates: Record<string, number>;
   exchangeRateSource: string | null;
@@ -65,9 +72,8 @@ export interface OrderRecord extends MandateSnapshot {
   reference: string | null;
   lifecycleStatus: OrderStatus;
   exceptionReason: string | null;
-  freeTimeEndsAt: string | null;
+  // freeTimeEndsAt and dailyDemurrageRate are inherited from MandateSnapshot.
   currentEta: string | null;
-  dailyDemurrageRate: number;
   riskStatus: DemurrageRiskStatus;
   voltaOperationId: string | null;
   voltaMarketId: string | null;

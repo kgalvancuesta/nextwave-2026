@@ -316,8 +316,19 @@ function scoreOffer(
   arrivalBounds: { earliest: number; latest: number } | null,
 ): number {
   const price = offer.normalizedPrice!;
+  // Landed cost, not sticker price. An arrival past the free time bills real
+  // demurrage, so the money axis has to carry it; an arrival inside the free
+  // time adds nothing, however much later it is than the preferred hour.
+  const lateHours = mandate.freeTimeEndsAt && offer.expectedArrival
+    ? Math.max(0, (Date.parse(offer.expectedArrival) - Date.parse(mandate.freeTimeEndsAt)) / 3_600_000)
+    : 0;
+  const landedCost = price + (Number.isFinite(lateHours) ? lateHours : 0) * (mandate.dailyDemurrageRate / 24);
+  // Measured from the ceiling across the mandate's own price range, and
+  // deliberately not capped at 100: capping made every quote at or below the
+  // target tie, so the price axis went binary and real savings under the
+  // target were invisible to ranking.
   const priceRange = Math.max(1, mandate.maximumPrice - mandate.targetPrice);
-  const priceScore = price <= mandate.targetPrice ? 100 : Math.max(0, 100 * (mandate.maximumPrice - price) / priceRange);
+  const priceScore = Math.max(0, 100 * (mandate.maximumPrice - landedCost) / priceRange);
   let speedScore = 50;
   if (offer.expectedArrival && mandate.preferredArrival) {
     const arrival = Date.parse(offer.expectedArrival);

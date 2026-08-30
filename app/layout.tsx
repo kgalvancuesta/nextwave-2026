@@ -1,5 +1,10 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { DM_Sans, Martian_Mono } from "next/font/google";
+import { cn } from "@/lib/utils";
+
+const dmSans = DM_Sans({ subsets: ["latin"], variable: "--font-sans" });
+const martianMono = Martian_Mono({ subsets: ["latin"], variable: "--font-mono" });
 
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.PUBLIC_BASE_URL || "http://localhost:3000"),
@@ -20,7 +25,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en">
+    <html lang="en" className={cn("font-sans", dmSans.variable, martianMono.variable)}>
       <body>{children}</body>
     </html>
   );

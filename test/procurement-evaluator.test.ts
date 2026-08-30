@@ -20,6 +20,8 @@ const mandate: MandateSnapshot = {
   desiredCarriers: 3,
   conditions: ["Tolls included"],
   currency: "USD",
+  freeTimeEndsAt: null,
+  dailyDemurrageRate: 0,
   exchangeRates: { USD: 1, MXN: 0.058676 },
   exchangeRateSource: "test",
 };
