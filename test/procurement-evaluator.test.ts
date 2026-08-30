@@ -10,6 +10,8 @@ import type { MandateSnapshot } from "@/lib/market-types";
 const mandate: MandateSnapshot = {
   targetPrice: 700,
   maximumPrice: 900,
+  preferredPickup: null,
+  mustPickupBy: null,
   preferredArrival: "2030-01-10T15:00:00.000Z",
   mustArriveBy: "2030-01-10T18:00:00.000Z",
   priceWeight: 0.6,
@@ -18,6 +20,8 @@ const mandate: MandateSnapshot = {
   desiredCarriers: 3,
   conditions: ["Tolls included"],
   currency: "USD",
+  exchangeRates: { USD: 1, MXN: 0.058676 },
+  exchangeRateSource: "test",
 };
 
 function offer(id: string, carrierId: string, price: number | null, arrival: string | null): ProcurementOfferFacts {
@@ -28,6 +32,7 @@ function offer(id: string, carrierId: string, price: number | null, arrival: str
     price,
     currency: price === null ? null : "USD",
     rateAllIn: price === null ? null : true,
+    pickupTime: null,
     expectedArrival: arrival,
     confirmedRequirements: ["Tolls included"],
     rejectedRequirements: [],
@@ -38,7 +43,7 @@ function offer(id: string, carrierId: string, price: number | null, arrival: str
 describe("deterministic procurement evaluator", () => {
   it("surfaces every hard-constraint violation with exact deltas", () => {
     const result = checkOfferFeasibility(mandate, {
-      ...offer("bad", "carrier-a", 950, "2030-01-10T18:30:00.000Z"),
+      ...offer("bad", "carrier-a", 20_000, "2030-01-10T18:30:00.000Z"),
       currency: "MXN",
       confirmedRequirements: [],
       rejectedRequirements: ["Tolls included"],
@@ -46,9 +51,10 @@ describe("deterministic procurement evaluator", () => {
 
     expect(result.feasible).toBe(false);
     expect(result.violations.map((violation) => violation.code)).toEqual([
-      "CURRENCY", "MAXIMUM_PRICE", "MANDATORY_ARRIVAL", "REQUIRED_CONDITION",
+      "MAXIMUM_PRICE", "MANDATORY_ARRIVAL", "REQUIRED_CONDITION",
     ]);
-    expect(result.violations.find((violation) => violation.code === "MAXIMUM_PRICE")?.delta).toBe(50);
+    expect(result.violations.find((violation) => violation.code === "MAXIMUM_PRICE")?.actual).toBe(1173.52);
+    expect(result.violations.find((violation) => violation.code === "MAXIMUM_PRICE")?.delta).toBe(273.52);
     expect(result.violations.find((violation) => violation.code === "MANDATORY_ARRIVAL")?.delta).toBe(30 * 60_000);
   });
 
@@ -129,7 +135,22 @@ describe("deterministic procurement evaluator", () => {
     });
 
     expect(result.phase).toBe("HUMAN_REVIEW");
-    expect(result.reviewReason).toBe("No complete feasible offer was collected before market close. Automatic award is prohibited.");
+    expect(result.reviewReason).toBe("No complete feasible offer was collected before market close. Missing: committed arrival. Automatic award is prohibited.");
+  });
+
+  it("compares a foreign-currency quote using the snapshotted backend rate", () => {
+    const evaluated = evaluateOffers({
+      ...mandate,
+      currency: "MXN",
+      targetPrice: 8_000,
+      maximumPrice: 10_000,
+      exchangeRates: { MXN: 1, USD: 17.0427 },
+    }, [{ ...offer("usd", "carrier-usd", 150, "2030-01-10T16:00:00.000Z"), currency: "USD" }])[0]!;
+
+    expect(evaluated.normalizedPrice).toBe(2556.41);
+    expect(evaluated.normalizedCurrency).toBe("MXN");
+    expect(evaluated.exchangeRate).toBe(17.0427);
+    expect(evaluated.feasible).toBe(true);
   });
 
   it("does not overwrite a real human-authority reason with a close-time summary", () => {

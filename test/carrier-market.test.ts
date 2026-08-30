@@ -11,6 +11,8 @@ class RecordingTelephony implements OutboundTelephonyGateway {
     this.requests.push(input);
     return { providerCallId: `CA_${this.requests.length}` };
   }
+
+  async playMessageAndHangup() {}
 }
 
 const recap: RecapGateway = {

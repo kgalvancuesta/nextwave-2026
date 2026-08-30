@@ -23,6 +23,7 @@ describe("three-call batches", () => {
         return { callSid: `CA_${input.to.slice(-3)}` };
       },
       async startRecording() { return { recordingSid: "RE_unused" }; },
+      async playMessageAndHangup() {},
     };
 
     const result = await initiateOutboundBatch({
@@ -53,6 +54,7 @@ describe("three-call batches", () => {
     const provider: TelephonyProvider = {
       async createCall() { return { callSid: "CA_market_1" }; },
       async startRecording() { return { recordingSid: "RE_unused" }; },
+      async playMessageAndHangup() {},
     };
 
     const result = await initiateOutboundBatch({

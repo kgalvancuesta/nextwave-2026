@@ -7,6 +7,8 @@ export interface NewOrderDraft {
   currency: string;
   targetPrice: string;
   maximumPrice: string;
+  preferredPickup?: string;
+  mustPickupBy?: string;
   preferredArrival: string;
   mustArriveBy: string;
   minimumValidOffers: string;
@@ -31,6 +33,7 @@ export function deadlineWhenEnabled(preferredArrival: string, previousDeadline: 
 }
 
 export function validateNewOrder(draft: NewOrderDraft, deadlineEnabled: boolean, selectedCarrierCount: number): NewOrderErrors {
+  void selectedCarrierCount;
   const errors: NewOrderErrors = {};
   if (!draft.name.trim()) errors.name = "Order name is required.";
   if (!draft.client.trim()) errors.client = "Client is required.";
@@ -49,12 +52,14 @@ export function validateNewOrder(draft: NewOrderDraft, deadlineEnabled: boolean,
       errors.mustArriveBy = "Latest arrival cannot be before preferred arrival.";
     }
   }
+  if (draft.mustPickupBy && draft.preferredPickup && Date.parse(draft.mustPickupBy) < Date.parse(draft.preferredPickup)) {
+    errors.mustPickupBy = "Latest pickup cannot be before preferred pickup.";
+  }
 
   const minimumOffers = Number(draft.minimumValidOffers);
   if (!Number.isInteger(minimumOffers) || minimumOffers < 1 || minimumOffers > 10) errors.minimumValidOffers = "Enter between 1 and 10 offers.";
   const desiredCarriers = Number(draft.desiredCarriers);
   if (!Number.isInteger(desiredCarriers) || desiredCarriers < 1 || desiredCarriers > 3) errors.desiredCarriers = "Enter between 1 and 3 carriers.";
-  if (selectedCarrierCount < 1) errors.carrierIds = "Select at least one carrier.";
   if (draft.dailyDemurrageRate && (!Number.isInteger(Number(draft.dailyDemurrageRate)) || Number(draft.dailyDemurrageRate) < 0)) {
     errors.dailyDemurrageRate = "Enter a non-negative whole daily rate.";
   }

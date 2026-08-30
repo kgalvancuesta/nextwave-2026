@@ -57,6 +57,8 @@ export interface StateStore {
 
 export interface OutboundTelephonyGateway {
   dial(input: { to: string; internalCallId: string; operationId: string }): Promise<{ providerCallId: string }>;
+  /** Replace the live SIP conversation with a fixed carrier-facing message, then end the phone leg. */
+  playMessageAndHangup(providerCallId: string, message: string): Promise<void>;
 }
 
 export interface RecapGateway {
@@ -72,19 +74,38 @@ export interface RecapGateway {
 export interface ProcurementControlUpdate {
   callId: string;
   instruction: string;
+  closingMessage?: string;
 }
+
+export type ProcurementFollowUp =
+  | { type: "START_REVALIDATION_CALLS"; marketId: string }
+  | {
+      type: "NOTIFY_DISPLACED_CARRIER";
+      contactId: string;
+      orderId: string;
+      marketId: string;
+      message: string;
+    };
 
 export interface ProcurementToolOutcome {
   result: unknown;
   controlUpdates: ProcurementControlUpdate[];
+  followUps?: ProcurementFollowUp[];
 }
 
 /** Adapter from a live Realtime call into the dashboard's authoritative procurement market. */
 export interface ProcurementVoicePort {
   prepareCall(callId: string): void;
   getProfile(callId: string): AgentCallProfile | null;
-  identifyCall(callId: string, reference: string): { attached: boolean; result: unknown };
+  identifyCall(callId: string, reference: string, evidence?: {
+    carrierName?: string | null;
+    callerName?: string | null;
+    origin?: string | null;
+    destination?: string | null;
+  }): { attached: boolean; result: unknown };
   recordUpdate(callId: string, input: unknown): ProcurementToolOutcome;
+  proposeAmendment(callId: string, input: unknown): ProcurementToolOutcome;
+  runFollowUps(followUps: ProcurementFollowUp[]): Promise<void>;
   getInstruction(callId: string): unknown;
   markHumanRequired(callId: string, reason: string): ProcurementToolOutcome | null;
   validateFinish(callId: string, marketRevision: number): unknown;

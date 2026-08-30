@@ -22,15 +22,17 @@ export function NewOrderModal({ contacts, onClose, onCreated, onAddCarrier }: Pr
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [conditions, setConditions] = useState<string[]>([""]);
   const [priority, setPriority] = useState(65);
+  const [alternateExchangeRate, setAlternateExchangeRate] = useState("17.0427");
   const [draft, setDraft] = useState<NewOrderDraft>({
     name: "", client: "", origin: "", destination: "", reference: "", currency: "MXN",
-    targetPrice: "", maximumPrice: "", preferredArrival: "", mustArriveBy: "",
+    targetPrice: "", maximumPrice: "", preferredPickup: "", mustPickupBy: "", preferredArrival: "", mustArriveBy: "",
     minimumValidOffers: "2", desiredCarriers: "3", freeTimeEndsAt: "", currentEta: "", dailyDemurrageRate: "",
   });
   const formRef = useRef<HTMLFormElement>(null);
   const selectedContacts = useMemo(() => contacts.filter((contact) => selected.has(contact.id)), [contacts, selected]);
   const validationErrors = useMemo(() => validateNewOrder(draft, deadlineEnabled, selected.size), [deadlineEnabled, draft, selected.size]);
   const visibleErrors = showValidation ? validationErrors : {};
+  const alternateCurrency = draft.currency === "MXN" ? "USD" : "MXN";
 
   function update(name: keyof NewOrderDraft, value: string) {
     setError(null);
@@ -64,6 +66,12 @@ export function NewOrderModal({ contacts, onClose, onCreated, onAddCarrier }: Pr
       });
       return;
     }
+    const exchangeRate = Number(alternateExchangeRate);
+    if (!Number.isFinite(exchangeRate) || exchangeRate <= 0) {
+      setError(`Enter a positive conversion rate from ${alternateCurrency} to ${draft.currency}.`);
+      window.requestAnimationFrame(() => formRef.current?.querySelector<HTMLElement>('[data-field="exchangeRate"]')?.focus());
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -72,8 +80,15 @@ export function NewOrderModal({ contacts, onClose, onCreated, onAddCarrier }: Pr
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           ...draft,
+          exchangeRates: {
+            [draft.currency]: 1,
+            [alternateCurrency]: exchangeRate,
+          },
+          exchangeRateSource: "Operator-configured order rate",
           targetPrice: Number(draft.targetPrice),
           maximumPrice: Number(draft.maximumPrice),
+          preferredPickup: draft.preferredPickup ? new Date(draft.preferredPickup).toISOString() : null,
+          mustPickupBy: draft.mustPickupBy ? new Date(draft.mustPickupBy).toISOString() : null,
           preferredArrival: draft.preferredArrival ? new Date(draft.preferredArrival).toISOString() : null,
           mustArriveBy: deadlineEnabled && draft.mustArriveBy ? new Date(draft.mustArriveBy).toISOString() : null,
           priceWeight: priority / 100,
@@ -115,11 +130,19 @@ export function NewOrderModal({ contacts, onClose, onCreated, onAddCarrier }: Pr
 
           <section className="border-t border-[var(--line)] pt-7">
             <SectionTitle number="02" title="Mandate" description="Target the agent should pursue and the hard authorization boundary." />
+            <div className="mt-4 grid gap-4 rounded-xl border border-[var(--line)] bg-[var(--paper)] p-4 sm:grid-cols-2">
+              <Field label="Standard comparison currency"><select className="field-input" value={draft.currency} onChange={(e) => { const currency = e.target.value; update("currency", currency); setAlternateExchangeRate(currency === "MXN" ? "17.0427" : "0.058676"); }}><option value="MXN">MXN — Mexican peso</option><option value="USD">USD — US dollar</option></select></Field>
+              <Field label={`Exchange rate: 1 ${alternateCurrency} equals`}><div className="relative"><input data-field="exchangeRate" required type="number" min="0.000001" step="0.000001" className="field-input pr-16" value={alternateExchangeRate} onChange={(e) => { setAlternateExchangeRate(e.target.value); setError(null); }} /><span className="pointer-events-none absolute inset-y-0 right-3 flex items-center font-mono text-xs text-[var(--muted)]">{draft.currency}</span></div><span className="mt-1 block text-xs text-[var(--muted)]">Snapshotted on the order and used for every backend comparison.</span></Field>
+            </div>
             <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               <Field label="Target price" error={visibleErrors.targetPrice}><div className="relative"><span className="currency-prefix">$</span><input data-field="targetPrice" aria-invalid={Boolean(visibleErrors.targetPrice)} type="number" min="0" step="1" className="field-input currency-input" value={draft.targetPrice} onChange={(e) => update("targetPrice", e.target.value)} placeholder="8000" /></div></Field>
               <Field label="Maximum price" error={visibleErrors.maximumPrice}><div className="relative"><span className="currency-prefix">$</span><input data-field="maximumPrice" aria-invalid={Boolean(visibleErrors.maximumPrice)} type="number" min="0" step="1" className="field-input currency-input" value={draft.maximumPrice} onChange={(e) => update("maximumPrice", e.target.value)} placeholder="9000" /></div></Field>
               <Field label="Preferred arrival"><input data-field="preferredArrival" type="datetime-local" className="field-input" value={draft.preferredArrival} onChange={(e) => update("preferredArrival", e.target.value)} /></Field>
               <div><span className="mb-1.5 block text-sm font-semibold">Latest arrival</span><label className="mb-2 flex items-center gap-2 text-sm font-medium"><input type="checkbox" checked={deadlineEnabled} onChange={(e) => toggleDeadline(e.target.checked)} className="h-4 w-4 accent-[var(--ink)]" /> Required deadline</label><input aria-label="Latest arrival deadline" data-field="mustArriveBy" aria-invalid={Boolean(visibleErrors.mustArriveBy)} disabled={!deadlineEnabled} type="datetime-local" min={draft.preferredArrival || undefined} className="field-input disabled:cursor-not-allowed disabled:opacity-50" value={draft.mustArriveBy} onChange={(e) => update("mustArriveBy", e.target.value)} />{visibleErrors.mustArriveBy && <span className="mt-1.5 block text-sm font-medium text-red-700">{visibleErrors.mustArriveBy}</span>}</div>
+            </div>
+            <div className="mt-4 grid gap-4 sm:grid-cols-2">
+              <Field label="Preferred pickup"><input data-field="preferredPickup" type="datetime-local" className="field-input" value={draft.preferredPickup} onChange={(e) => update("preferredPickup", e.target.value)} /></Field>
+              <Field label="Latest pickup (hard limit)" error={visibleErrors.mustPickupBy}><input data-field="mustPickupBy" aria-invalid={Boolean(visibleErrors.mustPickupBy)} type="datetime-local" min={draft.preferredPickup || undefined} className="field-input" value={draft.mustPickupBy} onChange={(e) => update("mustPickupBy", e.target.value)} /></Field>
             </div>
             <div className="mt-5 rounded-xl border border-[var(--line)] bg-[var(--paper)] p-4">
               <div className="flex items-center justify-between gap-4"><span className={priority > 50 ? "text-lg font-bold" : "text-sm font-medium text-[var(--muted)]"}>Save money</span><span className="font-mono text-xs text-[var(--muted)]">{priority}% price / {100 - priority}% speed</span><span className={priority < 50 ? "text-lg font-bold" : "text-sm font-medium text-[var(--muted)]"}>Arrive sooner</span></div>
@@ -149,13 +172,12 @@ export function NewOrderModal({ contacts, onClose, onCreated, onAddCarrier }: Pr
           </section>
 
           <section className="border-t border-[var(--line)] pt-7">
-            <div className="flex items-start justify-between gap-4"><SectionTitle number="05" title="Select carriers" description="Choose up to three saved contacts for the initial market." /><button type="button" onClick={onAddCarrier} className="secondary-button"><Plus size={15} /> New carrier</button></div>
+            <div className="flex items-start justify-between gap-4"><SectionTitle number="05" title="Carrier selection" description="Leave empty for Luna to rank and select carriers automatically, or choose up to three overrides." /><button type="button" onClick={onAddCarrier} className="secondary-button"><Plus size={15} /> New carrier</button></div>
             <div data-field="carrierIds" tabIndex={-1} className="mt-4 grid gap-2 sm:grid-cols-2">
               {contacts.map((contact) => { const checked = selected.has(contact.id); return <label key={contact.id} className={`flex cursor-pointer items-center gap-3 rounded-xl border p-3 ${checked ? "border-[var(--ink)] bg-[var(--paper)]" : "border-[var(--line)]"}`}><input type="checkbox" checked={checked} disabled={!checked && selected.size >= 3} onChange={() => toggleCarrier(contact.id)} className="h-5 w-5 accent-[var(--ink)]" /><span className="min-w-0"><span className="block truncate font-semibold">{contact.label}</span><span className="font-mono text-xs text-[var(--muted)]">{contact.e164PhoneNumber}</span></span></label>; })}
               {contacts.length === 0 && <button type="button" onClick={onAddCarrier} className="col-span-full rounded-xl border border-dashed border-[var(--line)] p-8 text-sm text-[var(--muted)]">Add a carrier before creating this order.</button>}
             </div>
-            {visibleErrors.carrierIds && <p className="mt-2 text-sm font-medium text-red-700">{visibleErrors.carrierIds}</p>}
-            <p className="mt-3 font-mono text-xs uppercase tracking-wider text-[var(--muted)]">{selected.size} selected</p>
+            <p className="mt-3 font-mono text-xs uppercase tracking-wider text-[var(--muted)]">{selected.size === 0 ? `Automatic · Luna selects ${draft.desiredCarriers}` : `${selected.size} manual override${selected.size === 1 ? "" : "s"}`}</p>
           </section>
         </div>
         <div className="sticky bottom-0 rounded-b-2xl border-t border-[var(--line)] bg-white px-6 py-4">

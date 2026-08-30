@@ -38,7 +38,13 @@ const commercialTermsArgs = {
   audioEvidence: audioEvidenceArgs,
 };
 
-const identifyOperationArgs = z.object({ external_reference: z.string() });
+const identifyOperationArgs = z.object({
+  external_reference: z.string(),
+  carrier_name: z.string().nullable(),
+  caller_name: z.string().nullable(),
+  origin: z.string().nullable(),
+  destination: z.string().nullable(),
+});
 
 const briefItemArgs = z.object({
   category: z.string(),
@@ -64,8 +70,8 @@ const procurementUpdateArgs = z.object({
   price: z.number().int().nonnegative().nullable(),
   currency: z.string().length(3).nullable(),
   rateAllIn: z.boolean().nullable(),
-  pickupTime: z.string().nullable().describe("ISO 8601 when known; otherwise the carrier's exact relative phrase, such as 'in 2 hours'."),
-  expectedArrival: z.string().nullable().describe("ISO 8601 when known; otherwise the carrier's exact relative phrase, such as 'in 12 hours'. The server normalizes relative time."),
+  pickupTime: z.string().nullable().describe("When the truck can pick up the cargo. Pass ISO 8601 when explicitly known; otherwise pass the carrier's exact phrase verbatim, such as 'tomorrow at 8 AM' or 'in 2 hours'. Never put destination arrival here."),
+  expectedArrival: z.string().nullable().describe("When the cargo will reach the destination. Pass ISO 8601 when explicitly known; otherwise pass the carrier's exact phrase verbatim, such as 'August 30th at 5 PM' or 'by two days'. Never put pickup time here or convert a clock time to a duration."),
   firm: z.boolean().nullable(),
   expiresAt: z.string().nullable().describe("ISO 8601 when known; otherwise the carrier's exact relative phrase."),
   accessorials: z.array(z.string()),
@@ -79,6 +85,15 @@ const procurementUpdateArgs = z.object({
 });
 
 const procurementInstructionArgs = z.object({});
+const amendmentArgs = z.object({
+  price: z.number().int().nonnegative().nullable(),
+  currency: z.string().length(3).nullable(),
+  pickupTime: z.string().nullable(),
+  expectedArrival: z.string().nullable(),
+  unsupportedChange: z.string().nullable(),
+  negotiationComplete: z.boolean(),
+  rawStatement: z.string().nullable(),
+});
 const finishProcurementArgs = z.object({
   marketRevision: z.number().int().nonnegative(),
   disposition: z.enum(["RELEASE", "COMPLETE"]),
@@ -86,7 +101,7 @@ const finishProcurementArgs = z.object({
 
 const identifyOperation = tool<typeof identifyOperationArgs, ToolContext, string>({
   name: "identify_operation",
-  description: "Attach an unassigned inbound call to an order after the caller provides the order/reference number shown on the order.",
+  description: "Attempt to match an inbound caller to an order using the reference, caller/carrier identity, and any route facts collected. Supply null for unknown evidence and follow the server's suggested next question.",
   parameters: identifyOperationArgs,
   execute: (input, runContext) => invoke(runContext, "identify_operation", input),
   errorFunction: toolFailure,
@@ -140,6 +155,14 @@ const getProcurementInstruction = tool<typeof procurementInstructionArgs, ToolCo
   errorFunction: procurementToolFailure,
 });
 
+const proposeProcurementAmendment = tool<typeof amendmentArgs, ToolContext, string>({
+  name: "propose_procurement_amendment",
+  description: "Submit a booked carrier's proposed price or pickup/delivery-time amendment for deterministic evaluation. This does not mutate the commitment unless the server returns ACCEPT.",
+  parameters: amendmentArgs,
+  execute: (input, runContext) => invoke(runContext, "propose_procurement_amendment", withoutNulls(input)),
+  errorFunction: procurementToolFailure,
+});
+
 const finishProcurementCall = tool<typeof finishProcurementArgs, ToolContext, string>({
   name: "finish_procurement_call",
   description: "After saying goodbye, end a released or completed procurement call. The server rejects stale market revisions.",
@@ -162,6 +185,8 @@ export function toolsForKind(kind: VoltaCallKind) {
       return [recordBriefItem, recordCarrierQuote, requestHumanEscalation];
     case "procurement":
       return [recordBriefItem, recordProcurementUpdate, getProcurementInstruction, finishProcurementCall, requestHumanEscalation];
+    case "amendment":
+      return [recordBriefItem, proposeProcurementAmendment, requestHumanEscalation];
     case "carrier_confirmation":
       return [recordBriefItem, proposeCommitment, requestHumanEscalation];
     case "direct":

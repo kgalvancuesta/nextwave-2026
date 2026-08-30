@@ -340,7 +340,12 @@ export class VoiceControlService {
     if (name === "identify_operation") {
       if (call.operationId) return { ok: true, operation_id: call.operationId, already_attached: true };
       const reference = z.string().min(1).parse(args.external_reference);
-      const procurement = this.procurement?.identifyCall(call.id, reference);
+      const procurement = this.procurement?.identifyCall(call.id, reference, {
+        carrierName: nullableAgentString(args.carrier_name),
+        callerName: nullableAgentString(args.caller_name),
+        origin: nullableAgentString(args.origin),
+        destination: nullableAgentString(args.destination),
+      });
       if (procurement?.attached) {
         await this.refreshCallProfile(call.id);
         return { ok: true, procurement_market_attached: true, attachment: procurement.result };
@@ -380,13 +385,22 @@ export class VoiceControlService {
     if (name === "record_procurement_update") {
       if (!this.procurement) throw new Error("Procurement workflow is not configured");
       const outcome = this.procurement.recordUpdate(call.id, args);
-      this.propagateProcurementUpdates(outcome.controlUpdates);
-      return outcome.result;
+      await this.propagateProcurementUpdates(outcome.controlUpdates);
+      await this.procurement.runFollowUps(outcome.followUps ?? []);
+      return this.handleAwardClosing(call.id, outcome.result);
+    }
+
+    if (name === "propose_procurement_amendment") {
+      if (!this.procurement) throw new Error("Procurement workflow is not configured");
+      const outcome = this.procurement.proposeAmendment(call.id, args);
+      await this.propagateProcurementUpdates(outcome.controlUpdates);
+      await this.procurement.runFollowUps(outcome.followUps ?? []);
+      return this.handleAwardClosing(call.id, outcome.result);
     }
 
     if (name === "get_procurement_instruction") {
       if (!this.procurement) throw new Error("Procurement workflow is not configured");
-      return this.procurement.getInstruction(call.id);
+      return this.handleAwardClosing(call.id, this.procurement.getInstruction(call.id));
     }
 
     if (name === "finish_procurement_call") {
@@ -404,7 +418,7 @@ export class VoiceControlService {
     if (name === "request_human_escalation") {
       const reason = z.string().min(1).parse(args.reason);
       const procurement = this.procurement?.markHumanRequired(call.id, reason);
-      if (procurement) this.propagateProcurementUpdates(procurement.controlUpdates);
+      if (procurement) await this.propagateProcurementUpdates(procurement.controlUpdates);
       if (!call.realtimeCallId || !this.options.humanEscalationUri) {
         this.store.appendEvent(call.id, "escalation.failed", { reason, error: "target_not_configured" });
         return { ok: false, error: "human escalation target is not configured" };
@@ -468,14 +482,50 @@ export class VoiceControlService {
     return buildAgentProfile({ call, operation, market, selectedQuote });
   }
 
-  private propagateProcurementUpdates(updates: ProcurementControlUpdate[]): void {
+  private async propagateProcurementUpdates(updates: ProcurementControlUpdate[]): Promise<void> {
     for (const update of updates) {
+      if (update.closingMessage) {
+        await this.dispatchAwardClosing(update.callId, update.closingMessage);
+        continue;
+      }
       const session = this.sessions.get(update.callId);
       if (!session) continue;
       session.injectContext(update.instruction);
       session.requestResponse();
       this.store.appendEvent(update.callId, "procurement.market_instruction_updated", { instruction: update.instruction });
     }
+  }
+
+  private async dispatchAwardClosing(callId: string, message: string): Promise<boolean> {
+    const call = this.requireCall(callId);
+    if (!call.providerCallId) {
+      this.store.appendEvent(call.id, "procurement.award_closing_failed", { error: "provider_call_id_missing" });
+      return false;
+    }
+    try {
+      await this.telephony.playMessageAndHangup(call.providerCallId, message);
+      this.store.appendEvent(call.id, "procurement.award_closing_dispatched", { message });
+      this.sessions.get(call.id)?.close();
+      this.sessions.delete(call.id);
+      return true;
+    } catch (error) {
+      this.store.appendEvent(call.id, "procurement.award_closing_failed", { error: errorMessage(error) });
+      return false;
+    }
+  }
+
+  private async handleAwardClosing(callId: string, result: unknown): Promise<unknown> {
+    const closing = awardClosing(result);
+    if (!closing) return result;
+    const dispatched = await this.dispatchAwardClosing(callId, closing.closingMessage);
+    return {
+      ...closing.result,
+      scripted_message_dispatched: dispatched,
+      ...(dispatched ? {} : {
+        terminal: false,
+        message: "The scripted phone redirect failed. Read closing_message verbatim, ask no further questions, then finish the call.",
+      }),
+    };
   }
 
   private refreshMarketReadiness(marketId: string): void {
@@ -564,6 +614,17 @@ export class VoiceControlService {
 function cleanHeader(value: string | undefined): string | undefined {
   if (!value) return undefined;
   return value.replace(/^['"]|['"]$/g, "").trim() || undefined;
+}
+
+function nullableAgentString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function awardClosing(value: unknown): { result: Record<string, unknown>; closingMessage: string } | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const result = value as Record<string, unknown>;
+  if (result.terminal !== true || typeof result.closing_message !== "string" || !result.closing_message.trim()) return null;
+  return { result, closingMessage: result.closing_message };
 }
 
 function errorMessage(error: unknown): string {

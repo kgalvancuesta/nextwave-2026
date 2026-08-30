@@ -18,6 +18,10 @@ export class TelephonyDialGateway implements OutboundTelephonyGateway {
     const result = await this.provider.createCall({ to: input.to, internalCallId: input.internalCallId });
     return { providerCallId: result.callSid };
   }
+
+  async playMessageAndHangup(providerCallId: string, message: string): Promise<void> {
+    await this.provider.playMessageAndHangup(providerCallId, message);
+  }
 }
 
 /** Sends the written SMS recap that turns an approved verbal agreement effective. */

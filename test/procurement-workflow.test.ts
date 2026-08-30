@@ -37,6 +37,22 @@ function completeOffer(price: number, arrival: string) {
 }
 
 describe("shared procurement workflow", () => {
+  it("keeps order cards in deterministic creation order when live updates change updated_at", () => {
+    const { db, repository, markets } = createTestContext();
+    const carrier = repository.createContact({ label: "FedEx", phoneInput: "+12025550100", e164PhoneNumber: "+12025550100" });
+    const base = {
+      client: "Nextwave", origin: "Manzanillo", destination: "Guadalajara", currency: "USD",
+      targetPrice: 700, maximumPrice: 900, priceWeight: 0.5, speedWeight: 0.5,
+      minimumValidOffers: 1, desiredCarriers: 1, conditions: [], carrierIds: [carrier.id],
+    };
+    const older = markets.createOrder({ ...base, name: "Older" });
+    const newer = markets.createOrder({ ...base, name: "Newer" });
+    db.prepare("UPDATE orders SET created_at = ?, updated_at = ? WHERE id = ?").run("2030-01-01T00:00:00.000Z", "2030-01-03T00:00:00.000Z", older.order.id);
+    db.prepare("UPDATE orders SET created_at = ?, updated_at = ? WHERE id = ?").run("2030-01-02T00:00:00.000Z", "2030-01-02T00:00:00.000Z", newer.order.id);
+
+    expect(markets.listOrders().map((workspace) => workspace.order.name)).toEqual(["Newer", "Older"]);
+  });
+
   it("keeps a no-offer Twilio failure visible instead of presenting it as a normal release", () => {
     const { markets, repository, marketId, carriers, calls } = setup();
     repository.setOutboundCallFailed(calls[0]!.id, "21216", "Twilio account is not allowed to call this destination");

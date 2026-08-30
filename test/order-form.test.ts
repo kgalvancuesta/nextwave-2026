@@ -52,6 +52,6 @@ describe("new order validation feedback", () => {
     const errors = validateNewOrder({ ...draft, destination: "", maximumPrice: "7000" }, true, 0);
     expect(errors.destination).toBe("Destination is required.");
     expect(errors.maximumPrice).toMatch(/greater than or equal/);
-    expect(errors.carrierIds).toBe("Select at least one carrier.");
+    expect(errors.carrierIds).toBeUndefined();
   });
 });

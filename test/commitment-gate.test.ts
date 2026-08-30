@@ -6,6 +6,7 @@ import { createTestVoltaStore } from "./helpers";
 
 const telephony: OutboundTelephonyGateway = {
   async dial() { return { providerCallId: "CA_1" }; },
+  async playMessageAndHangup() {},
 };
 
 const recap: RecapGateway = {

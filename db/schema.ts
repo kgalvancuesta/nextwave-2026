@@ -312,6 +312,50 @@ export const migrations = [
       "ALTER TABLE procurement_offer_versions ADD COLUMN rejected_requirements TEXT NOT NULL DEFAULT '[]'",
     ],
   },
+  {
+    id: "008_order_exchange_rates",
+    statements: [
+      "ALTER TABLE orders ADD COLUMN exchange_rates TEXT NOT NULL DEFAULT '{}'",
+      "ALTER TABLE orders ADD COLUMN exchange_rate_source TEXT",
+    ],
+  },
+  {
+    id: "009_self_healing_orders",
+    statements: [
+      "ALTER TABLE orders ADD COLUMN preferred_pickup TEXT",
+      "ALTER TABLE orders ADD COLUMN must_pickup_by TEXT",
+      "ALTER TABLE calls ADD COLUMN identification_attempts INTEGER NOT NULL DEFAULT 0",
+      `CREATE TABLE order_amendments (
+        id TEXT PRIMARY KEY,
+        order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+        commitment_id TEXT NOT NULL REFERENCES commitments(id) ON DELETE RESTRICT,
+        call_id TEXT REFERENCES calls(id) ON DELETE SET NULL,
+        status TEXT NOT NULL CHECK(status IN (
+          'PROPOSED', 'NEGOTIATING', 'ACCEPTED', 'RECOVERY_REQUIRED', 'HUMAN_REQUIRED', 'REJECTED', 'SUPERSEDED'
+        )),
+        original_terms TEXT NOT NULL,
+        requested_terms TEXT NOT NULL,
+        final_terms TEXT,
+        violations TEXT NOT NULL DEFAULT '[]',
+        decision_reason TEXT,
+        recovery_market_id TEXT REFERENCES markets(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL,
+        resolved_at TEXT,
+        UNIQUE(call_id)
+      )`,
+      "CREATE INDEX idx_order_amendments_order_created ON order_amendments(order_id, created_at DESC)",
+      "CREATE UNIQUE INDEX idx_commitments_one_active_order ON commitments(order_id) WHERE status = 'ACTIVE'",
+    ],
+  },
+  {
+    id: "010_retained_offer_revalidation",
+    statements: [
+      "ALTER TABLE market_carriers ADD COLUMN purpose TEXT",
+      "ALTER TABLE market_carriers ADD COLUMN source_offer_id TEXT REFERENCES procurement_offer_versions(id) ON DELETE SET NULL",
+      "ALTER TABLE market_carriers ADD COLUMN amendment_id TEXT REFERENCES order_amendments(id) ON DELETE SET NULL",
+      "CREATE INDEX idx_market_carriers_revalidation ON market_carriers(amendment_id, source_offer_id)",
+    ],
+  },
 ] as const;
 
 export function applyMigrations(db: Database.Database): string[] {

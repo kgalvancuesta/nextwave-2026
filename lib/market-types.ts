@@ -12,6 +12,7 @@ export type MarketCarrierStatus =
   | "NEGOTIATING" | "HUMAN" | "RELEASED" | "FAILED" | "UNAVAILABLE" | "AWARDED" | "COMPLETED";
 export type OfferAvailability = "UNKNOWN" | "AVAILABLE" | "UNAVAILABLE";
 export type OfferClassification = "PARTIAL" | "COMPARABLE" | "FRONTIER" | "DOMINATED" | "INFEASIBLE";
+export type OfferMissingField = "availability" | "price" | "exchange_rate" | "pickup" | "arrival" | "all_in" | "requirements";
 export type MarketPhase = "DISCOVERY" | "FRONTIER_NEGOTIATION" | "READY_TO_AWARD" | "HUMAN_REVIEW" | "CLOSED";
 export type EvaluatorAction =
   | "ASK_MISSING_FIELD" | "CONTINUE_DISCOVERY" | "HOLD" | "NEGOTIATE"
@@ -20,7 +21,7 @@ export type CommitmentStatus = "ACTIVE" | "INVALIDATED" | "FULFILLED";
 export type DemurrageRiskStatus = "MONITORED" | "AT_RISK" | "IN_PROGRESS" | "RESOLVED";
 
 export interface FeasibilityViolation {
-  code: "UNAVAILABLE" | "CURRENCY" | "MAXIMUM_PRICE" | "MANDATORY_ARRIVAL" | "REQUIRED_CONDITION";
+  code: "UNAVAILABLE" | "CURRENCY" | "MAXIMUM_PRICE" | "MANDATORY_PICKUP" | "MANDATORY_ARRIVAL" | "REQUIRED_CONDITION";
   message: string;
   actual: string | number | null;
   limit: string | number | null;
@@ -30,7 +31,7 @@ export interface FeasibilityViolation {
 export interface MarketInstruction {
   action: EvaluatorAction;
   reason: string;
-  field: "availability" | "price" | "arrival" | "all_in" | "requirements" | null;
+  field: OfferMissingField | null;
   targetPrice: number | null;
   targetArrival: string | null;
   marketRevision: number;
@@ -39,6 +40,8 @@ export interface MarketInstruction {
 export interface MandateSnapshot {
   targetPrice: number;
   maximumPrice: number;
+  preferredPickup: string | null;
+  mustPickupBy: string | null;
   preferredArrival: string | null;
   mustArriveBy: string | null;
   priceWeight: number;
@@ -47,6 +50,9 @@ export interface MandateSnapshot {
   desiredCarriers: number;
   conditions: string[];
   currency: string;
+  /** Units of the mandate currency for one unit of each quoted currency. */
+  exchangeRates: Record<string, number>;
+  exchangeRateSource: string | null;
 }
 
 export interface OrderRecord extends MandateSnapshot {
@@ -96,6 +102,10 @@ export interface OfferRecord {
   availability: OfferAvailability;
   price: number | null;
   currency: string | null;
+  normalizedPrice: number | null;
+  normalizedCurrency: string;
+  exchangeRate: number | null;
+  exchangeRateSource: string | null;
   rateAllIn: boolean | null;
   pickupTime: string | null;
   expectedArrival: string | null;
@@ -121,7 +131,7 @@ export interface OfferRecord {
   isValid: boolean;
   invalidReasons: string[];
   feasibilityViolations: FeasibilityViolation[];
-  missingFields: Array<"availability" | "price" | "arrival" | "all_in" | "requirements">;
+  missingFields: OfferMissingField[];
   classification: OfferClassification;
   isDominated: boolean;
   isFrontier: boolean;
@@ -151,15 +161,47 @@ export interface OrderEventRecord {
   createdAt: string;
 }
 
+export type AmendmentStatus =
+  | "PROPOSED" | "NEGOTIATING" | "ACCEPTED" | "RECOVERY_REQUIRED"
+  | "HUMAN_REQUIRED" | "REJECTED" | "SUPERSEDED";
+
+export interface AmendmentTerms {
+  price: number | null;
+  currency: string | null;
+  pickupTime: string | null;
+  expectedArrival: string | null;
+}
+
+export interface AmendmentRecord {
+  id: string;
+  orderId: string;
+  commitmentId: string;
+  callId: string | null;
+  carrierLabel: string;
+  status: AmendmentStatus;
+  originalTerms: AmendmentTerms;
+  requestedTerms: AmendmentTerms;
+  finalTerms: AmendmentTerms | null;
+  violations: FeasibilityViolation[];
+  decisionReason: string | null;
+  recoveryMarketId: string | null;
+  createdAt: string;
+  resolvedAt: string | null;
+}
+
 export interface MarketCarrierState {
   carrier: Contact;
   status: MarketCarrierStatus;
   latestOffer: OfferRecord | null;
+  /** A prior offer that must be reconfirmed before it can become authoritative again. */
+  retainedOffer: OfferRecord | null;
   latestCall: CallRecord | null;
   rank: number | null;
   instruction: MarketInstruction;
   negotiationRounds: number;
   humanReason: string | null;
+  purpose: string | null;
+  amendmentId: string | null;
 }
 
 export interface MarketState {
@@ -188,6 +230,7 @@ export interface OrderWorkspace {
   markets: MarketState[];
   commitments: CommitmentRecord[];
   events: OrderEventRecord[];
+  amendments: AmendmentRecord[];
   nautaCalls: CallRecord[];
   collapsedSummary: string;
 }

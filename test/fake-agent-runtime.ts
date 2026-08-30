@@ -12,6 +12,7 @@ export class FakeAgentRuntime implements RealtimeAgentGateway {
   readonly injected: string[] = [];
   readonly rebriefs: string[] = [];
   responsesRequested = 0;
+  sessionsClosed = 0;
   readonly transfers: Array<{ realtimeCallId: string; targetUri: string }> = [];
 
   async verifyWebhook(): Promise<unknown> {
@@ -31,7 +32,7 @@ export class FakeAgentRuntime implements RealtimeAgentGateway {
       useProfile: async (next) => { this.profile = next; this.rebriefs.push(next.kind); },
       injectContext: (text) => { this.injected.push(text); },
       requestResponse: () => { this.responsesRequested += 1; },
-      close: () => {},
+      close: () => { this.sessionsClosed += 1; },
     };
   }
 

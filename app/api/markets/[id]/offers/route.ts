@@ -8,6 +8,7 @@ const offerSchema = z.object({
   carrierId: z.string().uuid(),
   callId: z.string().uuid().nullable().optional(),
   price: z.number().int().nonnegative(),
+  currency: z.string().trim().length(3).optional(),
   pickupTime: optionalDate,
   expectedArrival: optionalDate,
   waitingTimeIncluded: z.string().trim().max(300).nullable().optional(),

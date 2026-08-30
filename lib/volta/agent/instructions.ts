@@ -29,8 +29,10 @@ export function buildAgentProfile(input: {
     return {
       kind: "intake",
       instructions: [...BASE_INSTRUCTIONS,
-        "This call is not linked to an order. Ask for the order/reference number shown on the order.",
-        "Use identify_operation with that order/reference number before discussing prices, schedules, or operational details.",
+        "This call is not linked to an order. Ask first for the order/reference number and the caller's name and carrier company.",
+        "Use identify_operation before discussing prices, schedules, or operational details. Supply null for identifying facts not yet known.",
+        "If matching fails, ask only the discriminating question returned by the server, then retry with the additional pickup or destination fact.",
+        "After three failed attempts or when the server says shouldEscalate=true, request human escalation. Never guess an order or reveal shipment details before a confident match.",
       ].join("\n"),
     };
   }

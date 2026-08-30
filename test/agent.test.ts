@@ -97,11 +97,17 @@ describe("volta agent", () => {
       "record_procurement_update",
       "request_human_escalation",
     ]);
+    expect(toolNames("amendment")).toEqual([
+      "propose_procurement_amendment",
+      "record_brief_item",
+      "request_human_escalation",
+    ]);
     // A quote call cannot book, and an unidentified caller cannot do commerce.
     expect(toolNames("carrier_quote")).not.toContain("propose_commitment");
     expect(toolNames("intake")).not.toContain("record_carrier_quote");
     expect(toolNames("intake")).not.toContain("propose_commitment");
     expect(toolNames("procurement")).not.toContain("propose_commitment");
+    expect(toolNames("amendment")).not.toContain("record_procurement_update");
   });
 
   it("builds a realtime agent with a strict schema for the quote tool", () => {

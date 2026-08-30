@@ -6,6 +6,7 @@ import type {
   MarketPhase,
   OfferAvailability,
   OfferClassification,
+  OfferMissingField,
 } from "./market-types";
 
 export interface ProcurementOfferFacts {
@@ -15,6 +16,7 @@ export interface ProcurementOfferFacts {
   price: number | null;
   currency: string | null;
   rateAllIn: boolean | null;
+  pickupTime: string | null;
   expectedArrival: string | null;
   confirmedRequirements: string[];
   rejectedRequirements: string[];
@@ -22,10 +24,13 @@ export interface ProcurementOfferFacts {
 }
 
 export interface EvaluatedProcurementOffer extends ProcurementOfferFacts {
+  normalizedPrice: number | null;
+  normalizedCurrency: string;
+  exchangeRate: number | null;
   comparable: boolean;
   feasible: boolean;
   violations: FeasibilityViolation[];
-  missingFields: Array<"availability" | "price" | "arrival" | "all_in" | "requirements">;
+  missingFields: OfferMissingField[];
   classification: OfferClassification;
   dominated: boolean;
   frontier: boolean;
@@ -73,23 +78,29 @@ export function checkOfferFeasibility(
   if (offer.availability === "UNAVAILABLE") {
     violations.push({ code: "UNAVAILABLE", message: "Carrier is unavailable", actual: "UNAVAILABLE", limit: "AVAILABLE", delta: null });
   }
-  if (offer.currency && offer.currency.toUpperCase() !== mandate.currency.toUpperCase()) {
-    violations.push({
-      code: "CURRENCY",
-      message: `Currency ${offer.currency.toUpperCase()} does not match ${mandate.currency.toUpperCase()}`,
-      actual: offer.currency.toUpperCase(),
-      limit: mandate.currency.toUpperCase(),
-      delta: null,
-    });
-  }
-  if (offer.price !== null && offer.price > mandate.maximumPrice) {
+  const normalized = normalizeOfferPrice(mandate, offer);
+  if (normalized && normalized.amount > mandate.maximumPrice) {
+    const delta = roundMoney(normalized.amount - mandate.maximumPrice);
     violations.push({
       code: "MAXIMUM_PRICE",
-      message: `Price exceeds maximum by ${offer.price - mandate.maximumPrice}`,
-      actual: offer.price,
+      message: `${formatAmount(normalized.amount, mandate.currency)} exceeds the maximum by ${formatAmount(delta, mandate.currency)}`,
+      actual: normalized.amount,
       limit: mandate.maximumPrice,
-      delta: offer.price - mandate.maximumPrice,
+      delta,
     });
+  }
+  if (offer.pickupTime && mandate.mustPickupBy) {
+    const pickup = Date.parse(offer.pickupTime);
+    const deadline = Date.parse(mandate.mustPickupBy);
+    if (Number.isFinite(pickup) && Number.isFinite(deadline) && pickup > deadline) {
+      violations.push({
+        code: "MANDATORY_PICKUP",
+        message: `Pickup misses the mandatory deadline by ${Math.ceil((pickup - deadline) / 60_000)} minutes`,
+        actual: offer.pickupTime,
+        limit: mandate.mustPickupBy,
+        delta: pickup - deadline,
+      });
+    }
   }
   if (offer.expectedArrival && mandate.mustArriveBy) {
     const arrival = Date.parse(offer.expectedArrival);
@@ -127,6 +138,8 @@ export function missingComparableFields(
   if (offer.availability === "UNKNOWN") missing.push("availability");
   if (offer.availability === "AVAILABLE") {
     if (offer.price === null || !offer.currency) missing.push("price");
+    else if (!normalizeOfferPrice(mandate, offer)) missing.push("exchange_rate");
+    if (!offer.pickupTime && (mandate.preferredPickup !== null || mandate.mustPickupBy !== null)) missing.push("pickup");
     if (!offer.expectedArrival && (mandate.preferredArrival !== null || mandate.mustArriveBy !== null)) missing.push("arrival");
     if (offer.rateAllIn !== true) missing.push("all_in");
     const confirmed = new Set(offer.confirmedRequirements.map(normalize));
@@ -142,9 +155,13 @@ export function evaluateOffers(
   const evaluated = offers.map((offer): EvaluatedProcurementOffer => {
     const missingFields = missingComparableFields(mandate, offer);
     const result = checkOfferFeasibility(mandate, offer);
+    const normalized = normalizeOfferPrice(mandate, offer);
     const comparable = offer.availability === "AVAILABLE" && missingFields.length === 0;
     return {
       ...offer,
+      normalizedPrice: normalized?.amount ?? null,
+      normalizedCurrency: mandate.currency.toUpperCase(),
+      exchangeRate: normalized?.rate ?? null,
       comparable,
       feasible: result.feasible,
       violations: result.violations,
@@ -176,7 +193,7 @@ export function evaluateMarket(input: MarketEvaluationInput): MarketEvaluation {
   const ranked = feasibleComparable
     .filter((offer) => offer.frontier)
     .sort((left, right) => right.score - left.score || (left.price ?? Infinity) - (right.price ?? Infinity) || left.id.localeCompare(right.id));
-  const cheapest = [...feasibleComparable].sort((left, right) => (left.price ?? Infinity) - (right.price ?? Infinity) || right.score - left.score)[0] ?? null;
+  const cheapest = [...feasibleComparable].sort((left, right) => (left.normalizedPrice ?? Infinity) - (right.normalizedPrice ?? Infinity) || right.score - left.score)[0] ?? null;
   const timedOut = Boolean(input.deadlineAt && Date.parse(input.now ?? new Date().toISOString()) >= Date.parse(input.deadlineAt));
   const discoveryComplete = timedOut || input.carriers.every((carrier) => isDiscoveryResolved(carrier, byCarrier.get(carrier.carrierId) ?? null));
   const actions: Record<string, MarketInstruction> = {};
@@ -249,7 +266,7 @@ export function evaluateMarket(input: MarketEvaluationInput): MarketEvaluation {
   const hasPartialOffer = offers.some((offer) => offer.feasible && !offer.comparable);
   const reviewReason = humanActive
     ? "A live carrier interaction requires human authority."
-    : noFeasibleAtClose ? noFeasibleReviewReason(offers.length, hasPartialOffer) : null;
+    : noFeasibleAtClose ? noFeasibleReviewReason(offers, hasPartialOffer) : null;
   const phase: MarketPhase = awardOfferId ? "READY_TO_AWARD"
     : noFeasibleAtClose || humanActive ? "HUMAN_REVIEW"
       : discoveryComplete ? "FRONTIER_NEGOTIATION" : "DISCOVERY";
@@ -271,22 +288,24 @@ export function evaluateMarket(input: MarketEvaluationInput): MarketEvaluation {
   }
 }
 
-function noFeasibleReviewReason(offerCount: number, hasPartialOffer: boolean): string {
-  if (offerCount === 0) {
+function noFeasibleReviewReason(offers: EvaluatedProcurementOffer[], hasPartialOffer: boolean): string {
+  if (offers.length === 0) {
     return "No carrier produced an offer before market close. Automatic award is prohibited.";
   }
   if (hasPartialOffer) {
-    return "No complete feasible offer was collected before market close. Automatic award is prohibited.";
+    const missing = [...new Set(offers.flatMap((offer) => offer.feasible ? offer.missingFields : []).map(missingFieldLabel))];
+    return `No complete feasible offer was collected before market close. Missing: ${missing.join(", ")}. Automatic award is prohibited.`;
   }
-  return "Every collected carrier response was unavailable or violated at least one hard constraint. Automatic award is prohibited.";
+  const reasons = [...new Set(offers.flatMap((offer) => offer.violations.map((violation) => violation.message)))];
+  return `No offer met every hard constraint. ${reasons.slice(0, 3).join("; ")}. Automatic award is prohibited.`;
 }
 
 function scoreOffer(
   mandate: MandateSnapshot,
-  offer: ProcurementOfferFacts,
+  offer: EvaluatedProcurementOffer,
   arrivalBounds: { earliest: number; latest: number } | null,
 ): number {
-  const price = offer.price!;
+  const price = offer.normalizedPrice!;
   const priceRange = Math.max(1, mandate.maximumPrice - mandate.targetPrice);
   const priceScore = price <= mandate.targetPrice ? 100 : Math.max(0, 100 * (mandate.maximumPrice - price) / priceRange);
   let speedScore = 50;
@@ -305,12 +324,45 @@ function scoreOffer(
 }
 
 function dominates(left: EvaluatedProcurementOffer, right: EvaluatedProcurementOffer): boolean {
-  if (left.price === null || right.price === null || !left.expectedArrival || !right.expectedArrival) return false;
+  if (left.normalizedPrice === null || right.normalizedPrice === null || !left.expectedArrival || !right.expectedArrival) return false;
   const leftArrival = Date.parse(left.expectedArrival);
   const rightArrival = Date.parse(right.expectedArrival);
   if (!Number.isFinite(leftArrival) || !Number.isFinite(rightArrival)) return false;
-  const noWorse = left.price <= right.price && leftArrival <= rightArrival;
-  return noWorse && (left.price < right.price || leftArrival < rightArrival);
+  const noWorse = left.normalizedPrice <= right.normalizedPrice && leftArrival <= rightArrival;
+  return noWorse && (left.normalizedPrice < right.normalizedPrice || leftArrival < rightArrival);
+}
+
+export function normalizeOfferPrice(
+  mandate: Pick<MandateSnapshot, "currency" | "exchangeRates">,
+  offer: Pick<ProcurementOfferFacts, "price" | "currency">,
+): { amount: number; currency: string; rate: number } | null {
+  if (offer.price === null || !offer.currency) return null;
+  const currency = offer.currency.toUpperCase();
+  const standard = mandate.currency.toUpperCase();
+  const rate = currency === standard ? 1 : mandate.exchangeRates?.[currency];
+  if (typeof rate !== "number" || !Number.isFinite(rate) || rate <= 0) return null;
+  return { amount: roundMoney(offer.price * rate), currency: standard, rate };
+}
+
+function missingFieldLabel(field: OfferMissingField): string {
+  const labels: Record<OfferMissingField, string> = {
+    availability: "availability",
+    price: "price and currency",
+    exchange_rate: "configured exchange rate",
+    pickup: "committed pickup",
+    arrival: "committed arrival",
+    all_in: "all-in confirmation",
+    requirements: "required-condition confirmation",
+  };
+  return labels[field];
+}
+
+function formatAmount(value: number, currency: string): string {
+  return `${currency.toUpperCase()} ${new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(value)}`;
+}
+
+function roundMoney(value: number): number {
+  return Math.round(value * 100) / 100;
 }
 
 function isDiscoveryResolved(carrier: MarketEvaluationCarrier, offer: EvaluatedProcurementOffer | null): boolean {

@@ -13,6 +13,8 @@ import {
   type EvaluatedProcurementOffer,
 } from "./procurement-evaluator";
 import type {
+  AmendmentRecord,
+  AmendmentTerms,
   CommitmentRecord,
   DemurrageRiskStatus,
   MandateSnapshot,
@@ -40,8 +42,12 @@ export interface CreateOrderInput {
   destination: string;
   reference?: string | null;
   currency: string;
+  exchangeRates?: Record<string, number>;
+  exchangeRateSource?: string | null;
   targetPrice: number;
   maximumPrice: number;
+  preferredPickup?: string | null;
+  mustPickupBy?: string | null;
   preferredArrival?: string | null;
   mustArriveBy?: string | null;
   priceWeight: number;
@@ -59,6 +65,7 @@ export interface RecordOfferInput {
   carrierId: string;
   callId?: string | null;
   price: number;
+  currency?: string;
   pickupTime?: string | null;
   expectedArrival?: string | null;
   waitingTimeIncluded?: string | null;
@@ -94,6 +101,34 @@ export interface InboundMarketAttachment {
   status: "ATTACHED" | "AMBIGUOUS" | "NOT_FOUND" | "CLOSED";
   marketId: string | null;
   candidates: Array<{ marketId: string; orderReference: string }>;
+  attempts?: number;
+  suggestedQuestion?: string | null;
+  shouldEscalate?: boolean;
+}
+
+export interface InboundMatchEvidence {
+  reference?: string | null;
+  carrierName?: string | null;
+  callerName?: string | null;
+  origin?: string | null;
+  destination?: string | null;
+}
+
+export interface AmendmentProposalInput {
+  price?: number | null;
+  currency?: string | null;
+  pickupTime?: string | null;
+  expectedArrival?: string | null;
+  unsupportedChange?: string | null;
+  negotiationComplete?: boolean;
+  rawStatement?: string | null;
+}
+
+export interface AmendmentDecision {
+  amendment: AmendmentRecord;
+  action: "ACCEPT" | "NEGOTIATE" | "REVALIDATE" | "RECOVER" | "HUMAN_HANDOFF";
+  recoveryMarketId: string | null;
+  negotiationTargets: { maximumPrice: number; mustPickupBy: string | null; mustArriveBy: string | null } | null;
 }
 
 export interface ProcurementCallContext {
@@ -102,8 +137,20 @@ export interface ProcurementCallContext {
   market: MarketRecord;
   carrier: Contact;
   latestOffer: OfferRecord | null;
+  retainedOffer: OfferRecord | null;
+  activeCommitment: CommitmentRecord | null;
+  isCommittedCarrier: boolean;
   instruction: MarketInstruction;
   marketClosed: boolean;
+}
+
+export interface RevalidationResolution {
+  order: OrderRecord;
+  amendment: AmendmentRecord;
+  originalCarrier: Contact;
+  selectedCarrier: Contact;
+  originalMarketId: string;
+  replaced: boolean;
 }
 
 export class OrderMarketService {
@@ -115,8 +162,12 @@ export class OrderMarketService {
 
   createOrder(input: CreateOrderInput): OrderWorkspace {
     validateOrderInput(input);
-    const contacts = this.calls.getContacts(input.carrierIds);
-    if (contacts.length !== input.carrierIds.length) throw new Error("One or more selected carriers no longer exist.");
+    const selectedCarrierIds = input.carrierIds.length > 0
+      ? [...new Set(input.carrierIds)]
+      : this.selectCarrierCandidates(input.origin, input.destination, input.desiredCarriers);
+    const contacts = this.calls.getContacts(selectedCarrierIds);
+    if (contacts.length !== selectedCarrierIds.length) throw new Error("One or more selected carriers no longer exist.");
+    if (contacts.length === 0) throw new Error("Add at least one carrier so Luna can create a market.");
     const now = new Date().toISOString();
     const orderId = randomUUID();
     const reference = input.reference?.trim() || generatedOrderReference(orderId);
@@ -131,28 +182,34 @@ export class OrderMarketService {
     this.db.transaction(() => {
       this.db.prepare(`INSERT INTO orders (
         id, name, client, origin, destination, reference, currency, target_price, maximum_price,
-        preferred_arrival, must_arrive_by, price_weight, speed_weight, minimum_valid_offers,
-        desired_carriers, lifecycle_status, free_time_ends_at, current_eta, daily_demurrage_rate, risk_status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SOURCING', ?, ?, ?, ?, ?, ?)`).run(
+        preferred_pickup, must_pickup_by, preferred_arrival, must_arrive_by, price_weight, speed_weight, minimum_valid_offers,
+        desired_carriers, lifecycle_status, free_time_ends_at, current_eta, daily_demurrage_rate, risk_status,
+        exchange_rates, exchange_rate_source, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SOURCING', ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         orderId, input.name.trim(), input.client.trim(), input.origin.trim(), input.destination.trim(),
         reference, input.currency, input.targetPrice, input.maximumPrice,
+        nullableDate(input.preferredPickup), nullableDate(input.mustPickupBy),
         nullableDate(input.preferredArrival), nullableDate(input.mustArriveBy), input.priceWeight,
         input.speedWeight, input.minimumValidOffers, input.desiredCarriers, nullableDate(input.freeTimeEndsAt), nullableDate(input.currentEta),
-        input.dailyDemurrageRate || 0, initialRiskStatus(input, now), now, now,
+        input.dailyDemurrageRate || 0, initialRiskStatus(input, now), JSON.stringify(mandate.exchangeRates), mandate.exchangeRateSource, now, now,
       );
       const conditionInsert = this.db.prepare(`INSERT INTO order_conditions
         (id, order_id, condition_text, position, created_at) VALUES (?, ?, ?, ?, ?)`);
       conditions.forEach((condition, index) => conditionInsert.run(randomUUID(), orderId, condition, index, now));
       const orderCarrierInsert = this.db.prepare(`INSERT INTO order_carriers
         (order_id, carrier_id, selected_at) VALUES (?, ?, ?)`);
-      input.carrierIds.forEach((carrierId) => orderCarrierInsert.run(orderId, carrierId, now));
+      selectedCarrierIds.forEach((carrierId) => orderCarrierInsert.run(orderId, carrierId, now));
       this.db.prepare(`INSERT INTO markets
         (id, order_id, sequence_number, status, reason, mandate_snapshot, created_at, updated_at)
         VALUES (?, ?, 1, 'DRAFT', 'INITIAL_PROCUREMENT', ?, ?, ?)`).run(marketId, orderId, JSON.stringify(mandate), now, now);
       const marketCarrierInsert = this.db.prepare(`INSERT INTO market_carriers
         (market_id, carrier_id, status, created_at, updated_at) VALUES (?, ?, 'SELECTED', ?, ?)`);
-      input.carrierIds.forEach((carrierId) => marketCarrierInsert.run(marketId, carrierId, now, now));
+      selectedCarrierIds.forEach((carrierId) => marketCarrierInsert.run(marketId, carrierId, now, now));
       this.insertEvent(orderId, null, null, "ORDER_CREATED", input.name.trim(), now);
+      if (input.carrierIds.length === 0) {
+        this.insertEvent(orderId, marketId, null, "CARRIERS_AUTO_SELECTED",
+          `Luna selected ${contacts.map((contact) => contact.label).join(", ")} using lane and outcome history.`, now);
+      }
       this.insertEvent(orderId, marketId, null, "MARKET_CREATED", "Initial procurement market", now);
     })();
 
@@ -160,13 +217,7 @@ export class OrderMarketService {
   }
 
   listOrders(): OrderWorkspace[] {
-    const rows = this.db.prepare(`SELECT id FROM orders ORDER BY
-      CASE lifecycle_status
-        WHEN 'EXCEPTION' THEN 0 WHEN 'CANCELED' THEN 0
-        WHEN 'SOURCING' THEN 1 WHEN 'NEGOTIATING' THEN 1
-        WHEN 'COMMITTED' THEN 2 WHEN 'IN_PROCESS' THEN 2
-        ELSE 3 END,
-      updated_at DESC`).all() as Row[];
+    const rows = this.db.prepare("SELECT id FROM orders ORDER BY created_at DESC, id DESC").all() as Row[];
     return rows.map((row) => this.getOrder(String(row.id))!).filter(Boolean);
   }
 
@@ -183,6 +234,7 @@ export class OrderMarketService {
     const marketRows = this.db.prepare("SELECT * FROM markets WHERE order_id = ? ORDER BY sequence_number DESC").all(orderId) as Row[];
     const markets = marketRows.map((market) => this.getMarketState(String(market.id))!);
     const commitments = this.listCommitments(orderId);
+    const amendments = this.listAmendments(orderId);
     const events = (this.db.prepare("SELECT * FROM order_events WHERE order_id = ? ORDER BY created_at DESC LIMIT 100").all(orderId) as Row[])
       .map(toEvent);
     const nautaCalls = order.voltaOperationId ? this.calls.listCallsForVoltaOperation(order.voltaOperationId) : [];
@@ -190,7 +242,7 @@ export class OrderMarketService {
     const currentMarket = ["COMPLETED", "ARCHIVED"].includes(order.lifecycleStatus)
       ? markets[0] || null
       : activeMarket || markets[0] || null;
-    return { order, currentMarket, markets, commitments, events, nautaCalls, collapsedSummary: summarizeOrder(order, currentMarket, commitments) };
+    return { order, currentMarket, markets, commitments, events, amendments, nautaCalls, collapsedSummary: summarizeOrder(order, currentMarket, commitments) };
   }
 
   getMarket(marketId: string): MarketRecord | null {
@@ -201,6 +253,37 @@ export class OrderMarketService {
   getMarketCarrierIds(marketId: string): string[] {
     return (this.db.prepare("SELECT carrier_id FROM market_carriers WHERE market_id = ? ORDER BY created_at").all(marketId) as Row[])
       .map((row) => String(row.carrier_id));
+  }
+
+  selectCarrierCandidates(origin: string, destination: string, limit: number): string[] {
+    const contacts = this.calls.listContacts();
+    const laneOrigin = normalizeLocation(origin);
+    const laneDestination = normalizeLocation(destination);
+    const scored = contacts.map((contact) => {
+      const rows = this.db.prepare(`SELECT orders.origin, orders.destination, orders.lifecycle_status,
+        commitments.status AS commitment_status
+        FROM order_carriers JOIN orders ON orders.id = order_carriers.order_id
+        LEFT JOIN commitments ON commitments.order_id = orders.id AND commitments.carrier_id = order_carriers.carrier_id
+        WHERE order_carriers.carrier_id = ?`).all(contact.id) as Row[];
+      let score = 1;
+      for (const row of rows) {
+        const exactLane = normalizeLocation(String(row.origin)) === laneOrigin
+          && normalizeLocation(String(row.destination)) === laneDestination;
+        if (exactLane) score += 40;
+        if (String(row.commitment_status || "") === "FULFILLED") score += exactLane ? 35 : 15;
+        if (String(row.commitment_status || "") === "ACTIVE") score += exactLane ? 20 : 8;
+        if (String(row.commitment_status || "") === "INVALIDATED") score -= exactLane ? 30 : 12;
+        if (String(row.lifecycle_status) === "COMPLETED") score += exactLane ? 15 : 5;
+      }
+      const participation = this.db.prepare(`SELECT COUNT(*) AS count FROM procurement_offer_versions
+        WHERE carrier_id = ? AND availability != 'UNKNOWN'`).get(contact.id) as Row;
+      score += Math.min(10, Number(participation.count || 0));
+      return { id: contact.id, label: contact.label, score };
+    });
+    return scored
+      .sort((left, right) => right.score - left.score || left.label.localeCompare(right.label) || left.id.localeCompare(right.id))
+      .slice(0, Math.max(1, Math.min(3, limit)))
+      .map((candidate) => candidate.id);
   }
 
   startMarket(marketId: string): { market: MarketRecord; carrierIds: string[] } {
@@ -231,6 +314,7 @@ export class OrderMarketService {
     const carrierRows = this.db.prepare(`SELECT contacts.*, market_carriers.status AS market_carrier_status
       , market_carriers.evaluator_action, market_carriers.action_reason, market_carriers.action_payload
       , market_carriers.action_revision, market_carriers.negotiation_rounds, market_carriers.human_reason
+      , market_carriers.purpose, market_carriers.source_offer_id, market_carriers.amendment_id
       FROM market_carriers JOIN contacts ON contacts.id = market_carriers.carrier_id
       WHERE market_carriers.market_id = ? ORDER BY contacts.label COLLATE NOCASE`).all(marketId) as Row[];
     const calls = this.calls.listCallsForMarket(marketId);
@@ -240,12 +324,28 @@ export class OrderMarketService {
       ORDER BY procurement_offer_versions.version DESC, procurement_offer_versions.created_at DESC`)
       .all(marketId) as Row[];
     const rawOffers = offerRows.map(toOffer);
+    const retainedByCarrier = new Map<string, OfferRecord>();
+    for (const row of carrierRows) {
+      const sourceOfferId = nullableString(row.source_offer_id);
+      if (!sourceOfferId) continue;
+      const sourceRow = this.db.prepare(`SELECT procurement_offer_versions.*, contacts.label AS carrier_label
+        FROM procurement_offer_versions JOIN contacts ON contacts.id = procurement_offer_versions.carrier_id
+        WHERE procurement_offer_versions.id = ?`).get(sourceOfferId) as Row | undefined;
+      if (!sourceRow) continue;
+      const source = toOffer(sourceRow);
+      const evaluated = evaluateOffers(market.mandate, [toOfferFacts(source)])[0]!;
+      retainedByCarrier.set(String(row.id), decorateOffer(source, evaluated, market.mandate.exchangeRateSource));
+    }
     const latestByCarrier = new Map<string, OfferRecord>();
     for (const offer of rawOffers) if (!latestByCarrier.has(offer.carrierId)) latestByCarrier.set(offer.carrierId, offer);
     const evaluation = this.evaluateSnapshot(market, carrierRows, calls, latestByCarrier);
     const evaluatedLatest = new Map(evaluation.offers.map((offer) => [offer.id, offer]));
     const historicalEvaluation = new Map(evaluateOffers(market.mandate, rawOffers.map(toOfferFacts)).map((offer) => [offer.id, offer]));
-    const offers = rawOffers.map((offer) => decorateOffer(offer, evaluatedLatest.get(offer.id) ?? historicalEvaluation.get(offer.id)!));
+    const offers = rawOffers.map((offer) => decorateOffer(
+      offer,
+      evaluatedLatest.get(offer.id) ?? historicalEvaluation.get(offer.id)!,
+      market.mandate.exchangeRateSource,
+    ));
     for (const [carrierId, offer] of latestByCarrier) {
       const decorated = offers.find((candidate) => candidate.id === offer.id);
       if (decorated) latestByCarrier.set(carrierId, decorated);
@@ -264,11 +364,14 @@ export class OrderMarketService {
         carrier,
         status: derivedCarrierStatus(String(row.market_carrier_status), latestCall, latestOffer, instruction, activeCommitment?.carrierId === carrier.id),
         latestOffer,
+        retainedOffer: retainedByCarrier.get(carrier.id) ?? null,
         latestCall,
         rank: latestOffer ? ranks.get(latestOffer.id) || null : null,
         instruction,
         negotiationRounds: Number(row.negotiation_rounds || 0),
         humanReason: nullableString(row.human_reason),
+        purpose: nullableString(row.purpose),
+        amendmentId: nullableString(row.amendment_id),
       };
     });
     const validLatest = [...latestByCarrier.values()].filter((offer) => offer.isComparable && offer.isValid);
@@ -305,7 +408,7 @@ export class OrderMarketService {
     return this.recordProgressiveOffer(marketId, input.carrierId, {
       availability: "AVAILABLE",
       price: input.price,
-      currency: market.mandate.currency,
+      currency: input.currency?.toUpperCase() || market.mandate.currency,
       rateAllIn: true,
       pickupTime: input.pickupTime,
       expectedArrival: input.expectedArrival,
@@ -400,7 +503,23 @@ export class OrderMarketService {
         .run(status, merged.availability, merged.humanRequired ? merged.humanReason || "Carrier interaction requires human review" : null,
           now, marketId, carrierId);
       this.insertEvent(market.orderId, marketId, callId || null, late ? "LATE_OFFER_RECEIVED" : previous ? "OFFER_UPDATED" : "OFFER_RECEIVED",
-        JSON.stringify({ availability: merged.availability, price: merged.price, arrival: merged.expectedArrival, version, late }), now);
+        JSON.stringify({
+          offerId,
+          carrierId,
+          availability: merged.availability,
+          price: merged.price,
+          currency: merged.currency,
+          normalizedPrice: evaluated.normalizedPrice,
+          normalizedCurrency: evaluated.normalizedCurrency,
+          exchangeRate: evaluated.exchangeRate,
+          arrival: merged.expectedArrival,
+          rateAllIn: merged.rateAllIn,
+          classification: evaluated.classification,
+          missingFields: evaluated.missingFields,
+          violations: evaluated.violations.map((violation) => violation.message),
+          version,
+          late,
+        }), now);
     })();
     return this.reevaluateMarket(marketId);
   }
@@ -455,6 +574,7 @@ export class OrderMarketService {
     })();
 
     if (evaluation.awardOfferId) this.awardAutomatically(marketId, evaluation.awardOfferId, evaluation.revision);
+    else if (market.reason === "AMENDMENT_REVALIDATION") this.acceptOriginalAmendmentIfRevalidationExhausted(marketId);
     return this.getMarketState(marketId)!;
   }
 
@@ -471,6 +591,9 @@ export class OrderMarketService {
       market: state.market,
       carrier: carrierState.carrier,
       latestOffer: carrierState.latestOffer,
+      retainedOffer: carrierState.retainedOffer,
+      activeCommitment: state.activeCommitment,
+      isCommittedCarrier: state.activeCommitment?.carrierId === carrierState.carrier.id,
       instruction: carrierState.instruction,
       marketClosed: ["COMMITTED", "CLOSED", "FAILED", "CANCELED"].includes(state.market.status),
     };
@@ -521,36 +644,384 @@ export class OrderMarketService {
   }
 
   attachInboundCallToMarket(callId: string, reference?: string): InboundMarketAttachment {
+    return this.matchInboundCall(callId, { reference });
+  }
+
+  matchInboundCall(callId: string, evidence: InboundMatchEvidence): InboundMarketAttachment {
     const call = this.calls.getCall(callId);
-    if (!call || call.direction !== "INBOUND" || !call.contactId) return { status: "NOT_FOUND", marketId: null, candidates: [] };
+    if (!call || call.direction !== "INBOUND") return { status: "NOT_FOUND", marketId: null, candidates: [] };
     if (call.marketId) {
       const market = this.getMarket(call.marketId);
       return { status: market && ["COMMITTED", "CLOSED"].includes(market.status) ? "CLOSED" : "ATTACHED", marketId: call.marketId, candidates: [] };
     }
-    const rows = this.db.prepare(`SELECT markets.id AS market_id, markets.order_id, markets.status, orders.reference, orders.name
+    const rows = this.db.prepare(`SELECT markets.id AS market_id, markets.order_id, markets.status, markets.sequence_number,
+      orders.reference, orders.name, orders.origin, orders.destination, market_carriers.carrier_id, contacts.label AS carrier_label
       FROM market_carriers JOIN markets ON markets.id = market_carriers.market_id
       JOIN orders ON orders.id = markets.order_id
-      WHERE market_carriers.carrier_id = ?
+      JOIN contacts ON contacts.id = market_carriers.carrier_id
       ORDER BY CASE WHEN markets.status IN ('CALLING', 'NEGOTIATING', 'OPEN', 'HUMAN_REVIEW') THEN 0 ELSE 1 END,
-        markets.updated_at DESC`).all(call.contactId) as Row[];
-    const normalized = reference ? normalizeOrderReference(reference) : null;
-    const matching = normalized
-      ? rows.filter((row) => normalizeOrderReference(String(row.reference || row.name)) === normalized)
-      : rows.filter((row) => ["CALLING", "NEGOTIATING", "OPEN", "HUMAN_REVIEW"].includes(String(row.status)));
+        markets.updated_at DESC`).all() as Row[];
+    const normalizedReference = evidence.reference?.trim() ? normalizeOrderReference(evidence.reference) : null;
+    const normalizedCarrier = evidence.carrierName?.trim() ? normalizeLocation(evidence.carrierName) : null;
+    const normalizedOrigin = evidence.origin?.trim() ? normalizeLocation(evidence.origin) : null;
+    const normalizedDestination = evidence.destination?.trim() ? normalizeLocation(evidence.destination) : null;
+    let matching = rows.filter((row) => {
+      if (call.contactId && String(row.carrier_id) !== call.contactId) return false;
+      if (!call.contactId && normalizedCarrier && normalizeLocation(String(row.carrier_label)) !== normalizedCarrier) return false;
+      if (normalizedReference && normalizeOrderReference(String(row.reference || row.name)) !== normalizedReference) return false;
+      if (normalizedOrigin && normalizeLocation(String(row.origin)) !== normalizedOrigin) return false;
+      if (normalizedDestination && normalizeLocation(String(row.destination)) !== normalizedDestination) return false;
+      if (!normalizedReference && !normalizedOrigin && !normalizedDestination) {
+        return ["CALLING", "NEGOTIATING", "OPEN", "HUMAN_REVIEW"].includes(String(row.status));
+      }
+      return true;
+    });
+    const identitySufficient = Boolean(call.contactId || normalizedCarrier);
+    if (!identitySufficient || (!normalizedReference && !call.contactId)) matching = [];
+    if (matching.length > 1) {
+      const orderIds = new Set(matching.map((row) => String(row.order_id)));
+      if (orderIds.size === 1) matching = [matching[0]!];
+    }
     const candidates = matching.map((row) => ({ marketId: String(row.market_id), orderReference: String(row.reference || row.name) }));
-    if (matching.length !== 1) return { status: matching.length > 1 ? "AMBIGUOUS" : "NOT_FOUND", marketId: null, candidates };
+    if (matching.length !== 1) {
+      const attempts = Number((this.db.prepare(`UPDATE calls SET identification_attempts = identification_attempts + 1,
+        updated_at = ? WHERE id = ? RETURNING identification_attempts`).get(new Date().toISOString(), callId) as Row | undefined)?.identification_attempts || 1);
+      const suggestedQuestion = !normalizedReference ? "Ask for the order/reference number."
+        : !identitySufficient ? "Ask for the carrier company name."
+          : !normalizedOrigin ? "Ask for the pickup city."
+            : !normalizedDestination ? "Ask for the destination city." : null;
+      return {
+        status: matching.length > 1 ? "AMBIGUOUS" : "NOT_FOUND",
+        marketId: null,
+        candidates,
+        attempts,
+        suggestedQuestion,
+        shouldEscalate: attempts >= 3,
+      };
+    }
     const target = matching[0]!;
     const now = new Date().toISOString();
     const closed = ["COMMITTED", "CLOSED"].includes(String(target.status));
     this.db.transaction(() => {
       this.db.prepare(`UPDATE calls SET order_id = ?, market_id = ?, carrier_id = ?, market_session_state = ?, updated_at = ? WHERE id = ?`)
-        .run(String(target.order_id), String(target.market_id), call.contactId, closed ? "COMPLETED" : "DISCOVERY", now, callId);
+        .run(String(target.order_id), String(target.market_id), String(target.carrier_id), closed ? "AMENDMENT" : "DISCOVERY", now, callId);
       this.db.prepare("UPDATE markets SET revision = revision + 1, updated_at = ? WHERE id = ?").run(now, String(target.market_id));
       this.insertEvent(String(target.order_id), String(target.market_id), callId, closed ? "LATE_INBOUND_CALL" : "INBOUND_CALL_ATTACHED",
         closed ? "Carrier called after market close" : "Inbound carrier callback attached", now);
     })();
     if (!closed) this.reevaluateMarket(String(target.market_id));
-    return { status: closed ? "CLOSED" : "ATTACHED", marketId: String(target.market_id), candidates };
+    return { status: closed ? "CLOSED" : "ATTACHED", marketId: String(target.market_id), candidates, attempts: 0, shouldEscalate: false };
+  }
+
+  proposeAmendmentForCall(callId: string, input: AmendmentProposalInput): AmendmentDecision {
+    const context = this.getProcurementCallContext(callId);
+    if (!context?.marketClosed || !context.activeCommitment || !context.isCommittedCarrier) {
+      throw new Error("Only the booked carrier can propose an amendment to the active commitment.");
+    }
+    const existing = this.getAmendmentByCall(callId);
+    if (existing && ["ACCEPTED", "RECOVERY_REQUIRED", "HUMAN_REQUIRED", "REJECTED"].includes(existing.status)) {
+      return amendmentDecisionFromRecord(existing, undefined, this.isRevalidationAmendment(existing));
+    }
+    if (input.price !== undefined && input.price !== null && (!Number.isInteger(input.price) || input.price < 0)) {
+      throw new Error("Amended price must be a non-negative whole amount.");
+    }
+    const committedOffer = this.getMarketState(context.market.id)?.offers
+      .find((offer) => offer.id === context.activeCommitment?.offerId);
+    if (!committedOffer) throw new Error("The active commitment terms could not be reconstructed.");
+    const originalTerms = amendmentTerms(committedOffer);
+    const requestedTerms: AmendmentTerms = {
+      price: input.price !== undefined ? input.price : originalTerms.price,
+      currency: input.currency !== undefined ? input.currency?.toUpperCase() || null : originalTerms.currency,
+      pickupTime: input.pickupTime !== undefined ? nullableDate(input.pickupTime) : originalTerms.pickupTime,
+      expectedArrival: input.expectedArrival !== undefined ? nullableDate(input.expectedArrival) : originalTerms.expectedArrival,
+    };
+    const unsupported = input.unsupportedChange?.trim() || null;
+    if (unsupported) {
+      const amendment = this.persistAmendment({
+        existing, context, status: "HUMAN_REQUIRED", originalTerms, requestedTerms,
+        finalTerms: null, violations: [], decisionReason: `Unsupported amendment: ${unsupported}`, recoveryMarketId: null,
+      });
+      const now = new Date().toISOString();
+      this.db.prepare(`UPDATE orders SET lifecycle_status = 'EXCEPTION', exception_reason = ?, updated_at = ? WHERE id = ?`)
+        .run(`Human review required: ${unsupported}`, now, context.order.id);
+      this.insertEvent(context.order.id, context.market.id, callId, "AMENDMENT_HUMAN_REQUIRED", unsupported, now);
+      return amendmentDecisionFromRecord(amendment);
+    }
+    if (sameAmendmentTerms(originalTerms, requestedTerms)) {
+      throw new Error("No price, pickup, or delivery change was provided.");
+    }
+
+    const revisedFacts: ProcurementOfferFacts = {
+      ...toOfferFacts(committedOffer),
+      id: `amendment-${existing?.id ?? callId}`,
+      price: requestedTerms.price,
+      currency: requestedTerms.currency,
+      pickupTime: requestedTerms.pickupTime,
+      expectedArrival: requestedTerms.expectedArrival,
+    };
+    const revised = evaluateOffers(context.market.mandate, [revisedFacts])[0]!;
+    if ((!revised.feasible || !revised.comparable) && !input.negotiationComplete) {
+      const amendment = this.persistAmendment({
+        existing, context, status: "NEGOTIATING", originalTerms, requestedTerms, finalTerms: null,
+        violations: revised.violations, decisionReason: revised.comparable
+          ? "Requested terms are outside the mandate; negotiate back into the feasible region."
+          : `Requested terms are incomplete: ${revised.missingFields.join(", ")}.`, recoveryMarketId: null,
+      });
+      this.insertEvent(context.order.id, context.market.id, callId, "AMENDMENT_NEGOTIATION_STARTED",
+        JSON.stringify({ amendmentId: amendment.id, violations: revised.violations }), new Date().toISOString());
+      return amendmentDecisionFromRecord(amendment, context.market.mandate);
+    }
+
+    const betterRetainedOffers = revised.feasible && revised.comparable
+      ? this.betterRetainedOffers(context.market.id, committedOffer.carrierId, revisedFacts)
+      : [];
+    if (revised.feasible && revised.comparable && betterRetainedOffers.length === 0) {
+      const amendment = this.acceptAmendment(existing, context, committedOffer, originalTerms, requestedTerms);
+      return amendmentDecisionFromRecord(amendment);
+    }
+
+    if (revised.feasible && revised.comparable) {
+      const reason = "The amendment is feasible, but a better retained offer must be reconfirmed before changing the carrier.";
+      let amendment = this.persistAmendment({
+        existing, context, status: "RECOVERY_REQUIRED", originalTerms, requestedTerms, finalTerms: null,
+        violations: [], decisionReason: reason, recoveryMarketId: null,
+      });
+      const revalidationMarket = this.createRetainedOfferRevalidationMarket(
+        context,
+        amendment,
+        betterRetainedOffers,
+        revised.normalizedPrice,
+      );
+      this.db.prepare("UPDATE order_amendments SET recovery_market_id = ?, resolved_at = NULL WHERE id = ?")
+        .run(revalidationMarket.id, amendment.id);
+      amendment = this.getAmendment(amendment.id)!;
+      return amendmentDecisionFromRecord(amendment, undefined, true);
+    }
+
+    const reason = "Negotiation did not restore a complete feasible commitment; recovery is required.";
+    let amendment = this.persistAmendment({
+      existing, context, status: "RECOVERY_REQUIRED", originalTerms, requestedTerms, finalTerms: null,
+      violations: revised.violations, decisionReason: reason, recoveryMarketId: null,
+    });
+    const recovery = this.getOrder(context.order.id)?.markets.find((state) =>
+      ["DRAFT", "OPEN", "CALLING", "NEGOTIATING"].includes(state.market.status)
+      && state.market.id !== context.market.id);
+    const workspace = recovery ? this.getOrder(context.order.id)! : this.createRecoveryMarket(context.order.id);
+    const recoveryMarket = recovery?.market ?? workspace.currentMarket?.market ?? null;
+    if (recoveryMarket) {
+      this.db.prepare("UPDATE order_amendments SET recovery_market_id = ? WHERE id = ?").run(recoveryMarket.id, amendment.id);
+      amendment = this.getAmendment(amendment.id)!;
+    }
+    const now = new Date().toISOString();
+    this.db.prepare(`UPDATE orders SET lifecycle_status = 'EXCEPTION', exception_reason = ?, updated_at = ? WHERE id = ?`)
+      .run("Commitment at risk; recovery market open.", now, context.order.id);
+    this.insertEvent(context.order.id, recoveryMarket?.id ?? context.market.id, callId, "COMMITMENT_AT_RISK",
+      JSON.stringify({ amendmentId: amendment.id, reason, violations: revised.violations }), now);
+    return amendmentDecisionFromRecord(amendment);
+  }
+
+  private betterRetainedOffers(marketId: string, carrierId: string, revised: ProcurementOfferFacts): OfferRecord[] {
+    const state = this.getMarketState(marketId);
+    if (!state) return [];
+    const alternatives = state.carriers.flatMap((carrier) => {
+      if (carrier.carrier.id === carrierId || !carrier.latestOffer) return [];
+      return [{ record: carrier.latestOffer, facts: toOfferFacts(carrier.latestOffer) }];
+    });
+    const evaluated = evaluateOffers(state.market.mandate, [revised, ...alternatives.map((entry) => entry.facts)])
+      .filter((offer) => offer.comparable && offer.feasible)
+      .sort((left, right) => right.score - left.score
+        || (left.normalizedPrice ?? Infinity) - (right.normalizedPrice ?? Infinity)
+        || left.id.localeCompare(right.id));
+    const revisedIndex = evaluated.findIndex((offer) => offer.id === revised.id);
+    if (revisedIndex <= 0) return [];
+    const betterIds = new Set(evaluated.slice(0, revisedIndex).map((offer) => offer.id));
+    return alternatives
+      .filter((entry) => betterIds.has(entry.record.id))
+      .map((entry) => entry.record)
+      .slice(0, 3);
+  }
+
+  private createRetainedOfferRevalidationMarket(
+    context: ProcurementCallContext,
+    amendment: AmendmentRecord,
+    offers: OfferRecord[],
+    revisedNormalizedPrice: number | null,
+  ): MarketRecord {
+    if (offers.length === 0) throw new Error("No retained offer is available to revalidate.");
+    const openMarket = this.db.prepare(`SELECT id, reason FROM markets WHERE order_id = ?
+      AND status IN ('DRAFT', 'OPEN', 'CALLING', 'NEGOTIATING') LIMIT 1`).get(context.order.id) as Row | undefined;
+    if (openMarket) {
+      if (String(openMarket.reason) === "AMENDMENT_REVALIDATION") return this.getMarket(String(openMarket.id))!;
+      throw new Error("This order already has an open market.");
+    }
+    const next = Number((this.db.prepare("SELECT COALESCE(MAX(sequence_number), 0) + 1 AS next FROM markets WHERE order_id = ?")
+      .get(context.order.id) as Row).next);
+    const now = new Date().toISOString();
+    const marketId = randomUUID();
+    const mandate = mandateFromOrder(context.order);
+    if (revisedNormalizedPrice !== null) {
+      mandate.maximumPrice = Math.min(mandate.maximumPrice, Math.max(0, Math.ceil(revisedNormalizedPrice) - 1));
+      mandate.targetPrice = Math.min(mandate.targetPrice, mandate.maximumPrice);
+    }
+    mandate.minimumValidOffers = 1;
+    mandate.desiredCarriers = offers.length;
+    this.db.transaction(() => {
+      this.db.prepare(`INSERT INTO markets
+        (id, order_id, sequence_number, status, reason, mandate_snapshot, created_at, updated_at)
+        VALUES (?, ?, ?, 'DRAFT', 'AMENDMENT_REVALIDATION', ?, ?, ?)`).run(
+        marketId, context.order.id, next, JSON.stringify(mandate), now, now,
+      );
+      const insert = this.db.prepare(`INSERT INTO market_carriers
+        (market_id, carrier_id, status, purpose, source_offer_id, amendment_id, negotiation_rounds, created_at, updated_at)
+        VALUES (?, ?, 'SELECTED', 'REVALIDATE_RETAINED_OFFER', ?, ?, 1, ?, ?)`);
+      for (const offer of offers) insert.run(marketId, offer.carrierId, offer.id, amendment.id, now, now);
+      this.db.prepare(`UPDATE orders SET lifecycle_status = 'EXCEPTION', exception_reason = ?, updated_at = ? WHERE id = ?`)
+        .run("Revalidating a better retained offer while the current commitment remains active.", now, context.order.id);
+      this.insertEvent(context.order.id, marketId, context.callId, "REVALIDATION_MARKET_CREATED",
+        JSON.stringify({ amendmentId: amendment.id, retainedOfferIds: offers.map((offer) => offer.id) }), now);
+    })();
+    return this.getMarket(marketId)!;
+  }
+
+  private isRevalidationAmendment(amendment: AmendmentRecord): boolean {
+    return Boolean(amendment.recoveryMarketId
+      && this.getMarket(amendment.recoveryMarketId)?.reason === "AMENDMENT_REVALIDATION");
+  }
+
+  private acceptAmendment(
+    existing: AmendmentRecord | null,
+    context: ProcurementCallContext,
+    committedOffer: OfferRecord,
+    originalTerms: AmendmentTerms,
+    requestedTerms: AmendmentTerms,
+    recoveryMarketId: string | null = null,
+    decisionReason = "Amendment remains within mandate and is still the best retained-market option.",
+  ): AmendmentRecord {
+    const now = new Date().toISOString();
+    const offerId = randomUUID();
+    const amendmentId = existing?.id ?? randomUUID();
+    this.db.transaction(() => {
+      const current = this.db.prepare("SELECT offer_id, status FROM commitments WHERE id = ?").get(context.activeCommitment!.id) as Row | undefined;
+      if (!current || String(current.status) !== "ACTIVE") throw new Error("The commitment changed while the amendment was being evaluated.");
+      if (existing && String(current.offer_id) !== context.activeCommitment!.offerId) throw new Error("The amendment is stale.");
+      const previous = this.db.prepare(`SELECT id, version FROM procurement_offer_versions
+        WHERE market_id = ? AND carrier_id = ? ORDER BY version DESC LIMIT 1`).get(context.market.id, context.carrier.id) as Row;
+      const version = Number(previous.version) + 1;
+      this.db.prepare(`INSERT INTO procurement_offer_versions (
+        id, market_id, carrier_id, call_id, version, availability, price, currency, rate_all_in,
+        pickup_time, expected_arrival, firm, expires_at, accessorials, carrier_conditions,
+        confirmed_requirements, rejected_requirements, raw_statement, confidence, human_required, human_reason,
+        supersedes_version_id, created_at
+      ) VALUES (?, ?, ?, ?, ?, 'AVAILABLE', ?, ?, 1, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)`).run(
+        offerId, context.market.id, context.carrier.id, context.callId, version,
+        requestedTerms.price, requestedTerms.currency, requestedTerms.pickupTime, requestedTerms.expectedArrival,
+        committedOffer.expiresAt, JSON.stringify(committedOffer.accessorials), JSON.stringify(committedOffer.carrierConditions),
+        JSON.stringify(committedOffer.confirmedRequirements), JSON.stringify(committedOffer.rejectedRequirements),
+        `Accepted carrier amendment on call ${context.callId}`, committedOffer.confidence, String(previous.id), now,
+      );
+      this.db.prepare(`INSERT INTO offers (
+        id, market_id, carrier_id, call_id, price, currency, pickup_time, expected_arrival,
+        waiting_time_included, extra_fees, conditions, is_final_offer, requires_immediate_decision,
+        callback_allowed, supersedes_offer_id, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 1, ?, ?)`).run(
+        offerId, context.market.id, context.carrier.id, context.callId, requestedTerms.price, requestedTerms.currency,
+        requestedTerms.pickupTime, requestedTerms.expectedArrival, committedOffer.waitingTimeIncluded,
+        committedOffer.extraFees, committedOffer.conditions, context.activeCommitment!.offerId, now,
+      );
+      this.db.prepare("UPDATE commitments SET offer_id = ? WHERE id = ? AND status = 'ACTIVE'")
+        .run(offerId, context.activeCommitment!.id);
+      this.upsertAmendmentRow({
+        id: amendmentId, callId: context.callId, orderId: context.order.id, commitmentId: context.activeCommitment!.id,
+        status: "ACCEPTED", originalTerms, requestedTerms, finalTerms: requestedTerms,
+        violations: [], decisionReason,
+        recoveryMarketId, now, resolvedAt: now,
+      });
+      this.db.prepare(`UPDATE orders SET lifecycle_status = 'COMMITTED', exception_reason = NULL, updated_at = ? WHERE id = ?`)
+        .run(now, context.order.id);
+      this.db.prepare("UPDATE markets SET revision = revision + 1, updated_at = ? WHERE id = ?").run(now, context.market.id);
+      this.insertEvent(context.order.id, context.market.id, context.callId, "AMENDMENT_ACCEPTED",
+        JSON.stringify({ amendmentId, originalTerms, requestedTerms, outboundCallsCreated: 0 }), now);
+    })();
+    return this.getAmendment(amendmentId)!;
+  }
+
+  private acceptOriginalAmendmentIfRevalidationExhausted(marketId: string): void {
+    const market = this.getMarket(marketId);
+    if (!market || market.reason !== "AMENDMENT_REVALIDATION"
+      || ["COMMITTED", "CLOSED", "FAILED", "CANCELED"].includes(market.status)) return;
+    const state = this.getMarketState(marketId);
+    if (!state || state.carriers.length === 0) return;
+    const resolvedWithoutBetterOffer = state.carriers.every((carrier) => Boolean(
+      carrier.latestOffer
+      && (carrier.latestOffer.availability === "UNAVAILABLE"
+        || carrier.instruction.action === "RELEASE"
+        || carrier.instruction.action === "HUMAN_REQUIRED"),
+    ));
+    if (!resolvedWithoutBetterOffer) return;
+    const amendment = this.listAmendments(market.orderId)
+      .find((candidate) => candidate.recoveryMarketId === marketId && candidate.status === "RECOVERY_REQUIRED");
+    if (!amendment?.callId) return;
+    const context = this.getProcurementCallContext(amendment.callId);
+    if (!context?.activeCommitment || !context.isCommittedCarrier) return;
+    const committedOffer = this.getMarketState(context.market.id)?.offers
+      .find((offer) => offer.id === context.activeCommitment?.offerId);
+    if (!committedOffer) return;
+    const accepted = this.acceptAmendment(
+      amendment,
+      context,
+      committedOffer,
+      amendment.originalTerms,
+      amendment.requestedTerms,
+      marketId,
+      "No retained competitor reconfirmed a better offer; the original carrier's feasible amendment remains best and was confirmed.",
+    );
+    const now = new Date().toISOString();
+    this.db.prepare("UPDATE markets SET status = 'CANCELED', closed_at = ?, review_reason = NULL, updated_at = ? WHERE id = ?")
+      .run(now, now, marketId);
+    this.insertEvent(market.orderId, marketId, amendment.callId, "REVALIDATION_EXHAUSTED",
+      JSON.stringify({ amendmentId: accepted.id, action: "ORIGINAL_AMENDMENT_CONFIRMED" }), now);
+  }
+
+  private persistAmendment(input: {
+    existing: AmendmentRecord | null;
+    context: ProcurementCallContext;
+    status: AmendmentRecord["status"];
+    originalTerms: AmendmentTerms;
+    requestedTerms: AmendmentTerms;
+    finalTerms: AmendmentTerms | null;
+    violations: AmendmentRecord["violations"];
+    decisionReason: string;
+    recoveryMarketId: string | null;
+  }): AmendmentRecord {
+    const now = new Date().toISOString();
+    const id = input.existing?.id ?? randomUUID();
+    this.upsertAmendmentRow({
+      id, callId: input.context.callId, orderId: input.context.order.id, commitmentId: input.context.activeCommitment!.id,
+      status: input.status, originalTerms: input.originalTerms, requestedTerms: input.requestedTerms,
+      finalTerms: input.finalTerms, violations: input.violations, decisionReason: input.decisionReason,
+      recoveryMarketId: input.recoveryMarketId, now,
+      resolvedAt: ["NEGOTIATING", "PROPOSED", "RECOVERY_REQUIRED"].includes(input.status) ? null : now,
+    });
+    return this.getAmendment(id)!;
+  }
+
+  private upsertAmendmentRow(input: {
+    id: string; callId: string; orderId: string; commitmentId: string; status: AmendmentRecord["status"];
+    originalTerms: AmendmentTerms; requestedTerms: AmendmentTerms; finalTerms: AmendmentTerms | null;
+    violations: AmendmentRecord["violations"]; decisionReason: string; recoveryMarketId: string | null;
+    now: string; resolvedAt: string | null;
+  }): void {
+    this.db.prepare(`INSERT INTO order_amendments (
+      id, order_id, commitment_id, call_id, status, original_terms, requested_terms, final_terms,
+      violations, decision_reason, recovery_market_id, created_at, resolved_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(call_id) DO UPDATE SET status = excluded.status, requested_terms = excluded.requested_terms,
+      final_terms = excluded.final_terms, violations = excluded.violations, decision_reason = excluded.decision_reason,
+      recovery_market_id = excluded.recovery_market_id, resolved_at = excluded.resolved_at`).run(
+      input.id, input.orderId, input.commitmentId, input.callId, input.status,
+      JSON.stringify(input.originalTerms), JSON.stringify(input.requestedTerms), input.finalTerms ? JSON.stringify(input.finalTerms) : null,
+      JSON.stringify(input.violations), input.decisionReason, input.recoveryMarketId, input.now, input.resolvedAt,
+    );
   }
 
   commitOffer(offerId: string): OrderWorkspace {
@@ -568,18 +1039,36 @@ export class OrderMarketService {
     }
     const now = new Date().toISOString();
     const commitmentId = randomUUID();
+    const nextRevision = market.revision + 1;
+    const awardInstruction = instructionForPersistence("AWARD", "offer_committed_by_operator", nextRevision);
+    const releaseInstruction = instructionForPersistence("RELEASE", "market_awarded_to_better_offer", nextRevision);
     this.db.transaction(() => {
-      const active = this.db.prepare("SELECT 1 FROM commitments WHERE market_id = ? AND status = 'ACTIVE'").get(market.id);
-      if (active) throw new Error("This market already has an active commitment.");
+      const active = this.db.prepare("SELECT id, market_id FROM commitments WHERE order_id = ? AND status = 'ACTIVE'")
+        .get(market.orderId) as Row | undefined;
+      if (active && String(active.market_id) === market.id) throw new Error("This market already has an active commitment.");
+      if (active) this.invalidatePriorCommitmentForRecovery(active, market, now);
       this.db.prepare(`INSERT INTO commitments
         (id, order_id, market_id, offer_id, carrier_id, status, created_at)
         VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?)`).run(commitmentId, market.orderId, market.id, offer.id, offer.carrierId, now);
-      this.db.prepare("UPDATE markets SET status = 'COMMITTED', closed_at = ?, updated_at = ? WHERE id = ?").run(now, now, market.id);
+      this.db.prepare("UPDATE markets SET status = 'COMMITTED', revision = ?, closed_at = ?, updated_at = ? WHERE id = ?")
+        .run(nextRevision, now, now, market.id);
       this.db.prepare("UPDATE orders SET lifecycle_status = 'COMMITTED', exception_reason = NULL, updated_at = ? WHERE id = ?")
         .run(now, market.orderId);
-      this.db.prepare("UPDATE market_carriers SET status = CASE WHEN carrier_id = ? THEN 'FINAL' ELSE status END, updated_at = ? WHERE market_id = ?")
+      this.db.prepare(`UPDATE market_carriers SET
+        status = CASE WHEN carrier_id = ? THEN 'FINAL' ELSE 'RELEASED' END,
+        evaluator_action = CASE WHEN carrier_id = ? THEN 'AWARD' ELSE 'RELEASE' END,
+        action_reason = CASE WHEN carrier_id = ? THEN 'offer_committed_by_operator' ELSE 'market_awarded_to_better_offer' END,
+        action_payload = CASE WHEN carrier_id = ? THEN ? ELSE ? END,
+        action_revision = ?, updated_at = ? WHERE market_id = ?`)
+        .run(offer.carrierId, offer.carrierId, offer.carrierId, offer.carrierId,
+          JSON.stringify(awardInstruction), JSON.stringify(releaseInstruction), nextRevision, now, market.id);
+      this.db.prepare(`UPDATE calls SET market_session_state = CASE
+        WHEN COALESCE(carrier_id, contact_id) = ? THEN 'AWARDED' ELSE 'RELEASED' END,
+        updated_at = ? WHERE market_id = ? AND status IN ('REQUESTED', 'INITIATED', 'RINGING', 'IN_PROGRESS')`)
         .run(offer.carrierId, now, market.id);
       this.insertEvent(market.orderId, market.id, offer.callId, "OFFER_COMMITTED", `Committed offer in ${offer.currency}`, now);
+      if (active) this.insertEvent(market.orderId, market.id, offer.callId, "ORDER_RECOVERED",
+        `Original carrier replaced by ${offer.carrierLabel}; mandate preserved.`, now);
     })();
     return this.getOrder(market.orderId)!;
   }
@@ -610,7 +1099,7 @@ export class OrderMarketService {
     const openMarket = this.db.prepare(`SELECT 1 FROM markets WHERE order_id = ?
       AND status IN ('DRAFT', 'OPEN', 'CALLING', 'NEGOTIATING') LIMIT 1`).get(orderId);
     if (openMarket) throw new Error("This order already has an open market.");
-    const selectedIds = carrierIds?.length ? [...new Set(carrierIds)] : order.carriers.map((carrier) => carrier.id);
+    const selectedIds = carrierIds?.length ? [...new Set(carrierIds)] : this.selectRecoveryCandidates(orderId);
     if (selectedIds.length < 1 || selectedIds.length > 3) throw new Error("Select between one and three carriers for recovery.");
     if (this.calls.getContacts(selectedIds).length !== selectedIds.length) throw new Error("One or more recovery carriers no longer exist.");
     const next = Number((this.db.prepare("SELECT COALESCE(MAX(sequence_number), 0) + 1 AS next FROM markets WHERE order_id = ?").get(orderId) as Row).next);
@@ -633,6 +1122,38 @@ export class OrderMarketService {
       this.insertEvent(orderId, marketId, null, "RECOVERY_MARKET_CREATED", `Recovery market #${next}`, now);
     })();
     return this.getOrder(orderId)!;
+  }
+
+  private selectRecoveryCandidates(orderId: string): string[] {
+    const workspace = this.getOrder(orderId);
+    if (!workspace) return [];
+    const atRiskCommitmentId = workspace.amendments.find((amendment) => amendment.status === "RECOVERY_REQUIRED")?.commitmentId;
+    const failedCarrierId = workspace.commitments.find((commitment) => commitment.id === atRiskCommitmentId)?.carrierId
+      ?? workspace.commitments.find((commitment) => commitment.status === "INVALIDATED")?.carrierId
+      ?? null;
+    const scores = new Map<string, number>();
+    for (const state of workspace.markets) {
+      for (const carrier of state.carriers) {
+        let score = scores.get(carrier.carrier.id) ?? 0;
+        if (carrier.latestOffer) score += 200;
+        if (carrier.latestOffer?.isComparable && carrier.latestOffer.isValid) score += 800 - (carrier.rank ?? 20) * 10;
+        if (carrier.latestOffer?.availability === "UNAVAILABLE") score -= 250;
+        scores.set(carrier.carrier.id, score);
+      }
+    }
+    for (const [index, carrierId] of this.selectCarrierCandidates(
+      workspace.order.origin,
+      workspace.order.destination,
+      3,
+    ).entries()) {
+      scores.set(carrierId, (scores.get(carrierId) ?? 0) + 100 - index);
+    }
+    const ranked = [...scores.entries()]
+      .filter(([carrierId]) => carrierId !== failedCarrierId)
+      .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+      .map(([carrierId]) => carrierId);
+    if (ranked.length === 0 && failedCarrierId) ranked.push(failedCarrierId);
+    return ranked.slice(0, Math.max(1, Math.min(3, workspace.order.desiredCarriers)));
   }
 
   completeOrder(orderId: string): OrderWorkspace {
@@ -733,8 +1254,10 @@ export class OrderMarketService {
       const latest = this.db.prepare(`SELECT id FROM procurement_offer_versions WHERE market_id = ? AND carrier_id = ?
         ORDER BY version DESC LIMIT 1`).get(marketId, offer.carrierId) as Row | undefined;
       if (String(latest?.id || "") !== expectedOfferId) return;
-      const active = this.db.prepare("SELECT 1 FROM commitments WHERE market_id = ? AND status = 'ACTIVE'").get(marketId);
-      if (active) return;
+      const active = this.db.prepare("SELECT id, market_id, carrier_id FROM commitments WHERE order_id = ? AND status = 'ACTIVE'")
+        .get(market.orderId) as Row | undefined;
+      if (active && String(active.market_id) === marketId) return;
+      if (active) this.invalidatePriorCommitmentForRecovery(active, market, now);
       this.db.prepare(`INSERT INTO commitments
         (id, order_id, market_id, offer_id, carrier_id, status, created_at)
         VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?)`).run(randomUUID(), market.orderId, marketId, offer.id, offer.carrierId, now);
@@ -749,7 +1272,70 @@ export class OrderMarketService {
         .run(offer.carrierId, offer.carrierId, offer.carrierId, expectedRevision, now, marketId);
       this.insertEvent(market.orderId, marketId, offer.callId, "OFFER_AUTO_AWARDED",
         JSON.stringify({ offerId: offer.id, carrierId: offer.carrierId, marketRevision: expectedRevision }), now);
+      if (active) {
+        const replacementMessage = market.reason === "AMENDMENT_REVALIDATION"
+          ? `Retained offer reconfirmed; original carrier replaced by ${offer.carrierLabel}.`
+          : `Original carrier replaced by ${offer.carrierLabel}; mandate preserved.`;
+        this.insertEvent(market.orderId, marketId, offer.callId, "ORDER_RECOVERED", replacementMessage, now);
+      }
+      if (market.reason === "AMENDMENT_REVALIDATION") {
+        const finalTerms = amendmentTerms(offer);
+        this.db.prepare(`UPDATE order_amendments SET status = 'ACCEPTED', final_terms = ?, violations = '[]',
+          decision_reason = ?, resolved_at = ? WHERE recovery_market_id = ?`).run(
+          JSON.stringify(finalTerms),
+          `A better retained offer was reconfirmed by ${offer.carrierLabel}; the commitment was switched atomically.`,
+          now,
+          market.id,
+        );
+        this.insertEvent(market.orderId, market.id, offer.callId, "RETAINED_OFFER_RECONFIRMED",
+          JSON.stringify({ carrierId: offer.carrierId, offerId: offer.id, finalTerms }), now);
+      }
     })();
+  }
+
+  private invalidatePriorCommitmentForRecovery(active: Row, targetMarket: MarketRecord, now: string): void {
+    const order = this.db.prepare("SELECT lifecycle_status FROM orders WHERE id = ?").get(targetMarket.orderId) as Row | undefined;
+    if (!["CARRIER_FAILURE", "AMENDMENT_REVALIDATION"].includes(targetMarket.reason)
+      || String(order?.lifecycle_status) !== "EXCEPTION") {
+      throw new Error("An active order commitment can only be replaced by an authorized recovery market.");
+    }
+    const reason = targetMarket.reason === "AMENDMENT_REVALIDATION"
+      ? `Replaced after retained offer reconfirmation in market #${targetMarket.sequenceNumber}`
+      : `Replaced atomically by recovery market #${targetMarket.sequenceNumber}`;
+    this.db.prepare(`UPDATE commitments SET status = 'INVALIDATED', invalidated_at = ?, invalidation_reason = ?
+      WHERE id = ? AND status = 'ACTIVE'`).run(now, reason, String(active.id));
+    if (targetMarket.reason === "CARRIER_FAILURE") {
+      this.db.prepare("UPDATE markets SET status = 'FAILED', updated_at = ? WHERE id = ?")
+        .run(now, String(active.market_id));
+    }
+    this.insertEvent(targetMarket.orderId, String(active.market_id), null, "COMMITMENT_REPLACED", reason, now);
+  }
+
+  getRevalidationResolution(marketId: string): RevalidationResolution | null {
+    const market = this.getMarket(marketId);
+    if (!market || market.reason !== "AMENDMENT_REVALIDATION"
+      || !["COMMITTED", "CANCELED"].includes(market.status)) return null;
+    const workspace = this.getOrder(market.orderId);
+    const amendment = workspace?.amendments.find((candidate) => candidate.recoveryMarketId === marketId);
+    const active = workspace?.commitments.find((commitment) => commitment.status === "ACTIVE");
+    const original = amendment
+      ? workspace?.commitments.find((commitment) => commitment.id === amendment.commitmentId)
+      : null;
+    const originalCarrier = original
+      ? workspace?.order.carriers.find((carrier) => carrier.id === original.carrierId)
+      : null;
+    const selectedCarrier = active
+      ? workspace?.order.carriers.find((carrier) => carrier.id === active.carrierId)
+      : null;
+    if (!workspace || amendment?.status !== "ACCEPTED" || !active || !original || !originalCarrier || !selectedCarrier) return null;
+    return {
+      order: workspace.order,
+      amendment,
+      originalCarrier,
+      selectedCarrier,
+      originalMarketId: original.marketId,
+      replaced: active.id !== original.id,
+    };
   }
 
   private toOrder(row: Row): OrderRecord {
@@ -766,8 +1352,12 @@ export class OrderMarketService {
       destination: String(row.destination),
       reference: nullableString(row.reference),
       currency: String(row.currency),
+      exchangeRates: normalizeExchangeRates(String(row.currency), jsonNumberRecord(row.exchange_rates)),
+      exchangeRateSource: nullableString(row.exchange_rate_source) || defaultExchangeRateSource(String(row.currency)),
       targetPrice: Number(row.target_price),
       maximumPrice: Number(row.maximum_price),
+      preferredPickup: nullableString(row.preferred_pickup),
+      mustPickupBy: nullableString(row.must_pickup_by),
       preferredArrival: nullableString(row.preferred_arrival),
       mustArriveBy: nullableString(row.must_arrive_by),
       priceWeight: Number(row.price_weight),
@@ -802,6 +1392,30 @@ export class OrderMarketService {
       .all(orderId) as Row[]).map(toCommitment);
   }
 
+  private listAmendments(orderId: string): AmendmentRecord[] {
+    return (this.db.prepare(`SELECT order_amendments.*, contacts.label AS carrier_label FROM order_amendments
+      JOIN commitments ON commitments.id = order_amendments.commitment_id
+      JOIN contacts ON contacts.id = commitments.carrier_id
+      WHERE order_amendments.order_id = ? ORDER BY order_amendments.created_at DESC`)
+      .all(orderId) as Row[]).map(toAmendment);
+  }
+
+  getAmendment(amendmentId: string): AmendmentRecord | null {
+    const row = this.db.prepare(`SELECT order_amendments.*, contacts.label AS carrier_label FROM order_amendments
+      JOIN commitments ON commitments.id = order_amendments.commitment_id
+      JOIN contacts ON contacts.id = commitments.carrier_id
+      WHERE order_amendments.id = ?`).get(amendmentId) as Row | undefined;
+    return row ? toAmendment(row) : null;
+  }
+
+  private getAmendmentByCall(callId: string): AmendmentRecord | null {
+    const row = this.db.prepare(`SELECT order_amendments.*, contacts.label AS carrier_label FROM order_amendments
+      JOIN commitments ON commitments.id = order_amendments.commitment_id
+      JOIN contacts ON contacts.id = commitments.carrier_id
+      WHERE order_amendments.call_id = ?`).get(callId) as Row | undefined;
+    return row ? toAmendment(row) : null;
+  }
+
   private insertEvent(orderId: string, marketId: string | null, callId: string | null, eventType: string, detail: string | null, createdAt: string) {
     this.db.prepare(`INSERT INTO order_events (id, order_id, market_id, call_id, event_type, detail, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)`).run(randomUUID(), orderId, marketId, callId, eventType, detail, createdAt);
@@ -823,11 +1437,19 @@ function validateOrderInput(input: CreateOrderInput) {
   if (input.mustArriveBy && input.preferredArrival && Date.parse(input.mustArriveBy) < Date.parse(input.preferredArrival)) {
     throw new Error("Must arrive by cannot be before preferred arrival.");
   }
-  if (input.carrierIds.length < 1 || input.carrierIds.length > 3 || new Set(input.carrierIds).size !== input.carrierIds.length) {
-    throw new Error("Select between one and three unique carriers.");
+  if (input.mustPickupBy && input.preferredPickup && Date.parse(input.mustPickupBy) < Date.parse(input.preferredPickup)) {
+    throw new Error("Must pick up by cannot be before preferred pickup.");
+  }
+  if (input.carrierIds.length > 3 || new Set(input.carrierIds).size !== input.carrierIds.length) {
+    throw new Error("Select up to three unique carriers, or leave the list empty for automatic selection.");
   }
   if (input.dailyDemurrageRate !== undefined && (!Number.isInteger(input.dailyDemurrageRate) || input.dailyDemurrageRate < 0)) {
     throw new Error("Daily demurrage rate must be a non-negative whole amount.");
+  }
+  for (const [currency, rate] of Object.entries(input.exchangeRates ?? {})) {
+    if (!/^[A-Za-z]{3}$/.test(currency) || !Number.isFinite(rate) || rate <= 0) {
+      throw new Error("Exchange rates require a three-letter currency and a positive numeric rate.");
+    }
   }
 }
 
@@ -837,9 +1459,12 @@ function initialRiskStatus(input: CreateOrderInput, now: string): DemurrageRiskS
 }
 
 function mandateFromInput(input: CreateOrderInput, conditions: string[]): MandateSnapshot {
+  const currency = input.currency.toUpperCase();
   return {
     targetPrice: input.targetPrice,
     maximumPrice: input.maximumPrice,
+    preferredPickup: nullableDate(input.preferredPickup),
+    mustPickupBy: nullableDate(input.mustPickupBy),
     preferredArrival: nullableDate(input.preferredArrival),
     mustArriveBy: nullableDate(input.mustArriveBy),
     priceWeight: input.priceWeight,
@@ -847,20 +1472,24 @@ function mandateFromInput(input: CreateOrderInput, conditions: string[]): Mandat
     minimumValidOffers: input.minimumValidOffers,
     desiredCarriers: input.desiredCarriers,
     conditions,
-    currency: input.currency,
+    currency,
+    exchangeRates: normalizeExchangeRates(currency, input.exchangeRates),
+    exchangeRateSource: input.exchangeRateSource?.trim()
+      || (input.exchangeRates ? "Operator-configured order rate" : defaultExchangeRateSource(currency)),
   };
 }
 
 function mandateFromOrder(order: OrderRecord): MandateSnapshot {
-  const { targetPrice, maximumPrice, preferredArrival, mustArriveBy, priceWeight, speedWeight, minimumValidOffers, desiredCarriers, conditions, currency } = order;
-  return { targetPrice, maximumPrice, preferredArrival, mustArriveBy, priceWeight, speedWeight, minimumValidOffers, desiredCarriers, conditions, currency };
+  const { targetPrice, maximumPrice, preferredPickup, mustPickupBy, preferredArrival, mustArriveBy, priceWeight, speedWeight, minimumValidOffers, desiredCarriers, conditions, currency, exchangeRates, exchangeRateSource } = order;
+  return { targetPrice, maximumPrice, preferredPickup, mustPickupBy, preferredArrival, mustArriveBy, priceWeight, speedWeight, minimumValidOffers, desiredCarriers, conditions, currency, exchangeRates, exchangeRateSource };
 }
 
 function toMarket(row: Row): MarketRecord {
+  const mandate = normalizeMandate(JSON.parse(String(row.mandate_snapshot)) as Partial<MandateSnapshot> & Pick<MandateSnapshot, "currency">);
   return {
     id: String(row.id), orderId: String(row.order_id), sequenceNumber: Number(row.sequence_number),
     status: String(row.status) as MarketRecord["status"], reason: String(row.reason),
-    mandate: JSON.parse(String(row.mandate_snapshot)) as MandateSnapshot,
+    mandate,
     createdAt: String(row.created_at), updatedAt: String(row.updated_at), closedAt: nullableString(row.closed_at),
     revision: Number(row.revision || 0), startedAt: nullableString(row.started_at),
     procurementDeadlineAt: nullableString(row.procurement_deadline_at), automaticAward: Boolean(row.automatic_award),
@@ -874,6 +1503,7 @@ function toOffer(row: Row): OfferRecord {
     carrierLabel: nullableString(row.carrier_label) || "", callId: nullableString(row.call_id),
     version: Number(row.version || 0), availability: String(row.availability || "UNKNOWN") as OfferAvailability,
     price: nullableNumber(row.price), currency: nullableString(row.currency), rateAllIn: nullableBooleanFromRow(row.rate_all_in),
+    normalizedPrice: null, normalizedCurrency: "", exchangeRate: null, exchangeRateSource: null,
     pickupTime: nullableString(row.pickup_time), expectedArrival: nullableString(row.expected_arrival),
     firm: nullableBooleanFromRow(row.firm), expiresAt: nullableString(row.expires_at),
     accessorials: jsonStringArray(row.accessorials), carrierConditions: jsonStringArray(row.carrier_conditions),
@@ -889,7 +1519,7 @@ function toOffer(row: Row): OfferRecord {
 }
 
 function toOfferFacts(offer: Pick<OfferRecord,
-  "id" | "carrierId" | "availability" | "price" | "currency" | "rateAllIn" | "expectedArrival"
+  "id" | "carrierId" | "availability" | "price" | "currency" | "rateAllIn" | "pickupTime" | "expectedArrival"
   | "confirmedRequirements" | "rejectedRequirements" | "humanRequired"
 >): ProcurementOfferFacts {
   return {
@@ -899,6 +1529,7 @@ function toOfferFacts(offer: Pick<OfferRecord,
     price: offer.price,
     currency: offer.currency,
     rateAllIn: offer.rateAllIn,
+    pickupTime: offer.pickupTime,
     expectedArrival: offer.expectedArrival,
     confirmedRequirements: offer.confirmedRequirements,
     rejectedRequirements: offer.rejectedRequirements,
@@ -906,9 +1537,13 @@ function toOfferFacts(offer: Pick<OfferRecord,
   };
 }
 
-function decorateOffer(offer: OfferRecord, evaluated: EvaluatedProcurementOffer): OfferRecord {
+function decorateOffer(offer: OfferRecord, evaluated: EvaluatedProcurementOffer, exchangeRateSource: string | null): OfferRecord {
   return {
     ...offer,
+    normalizedPrice: evaluated.normalizedPrice,
+    normalizedCurrency: evaluated.normalizedCurrency,
+    exchangeRate: evaluated.exchangeRate,
+    exchangeRateSource: evaluated.exchangeRate === null ? null : exchangeRateSource,
     isComparable: evaluated.comparable,
     isValid: evaluated.feasible,
     invalidReasons: evaluated.violations.map((violation) => violation.message),
@@ -926,6 +1561,7 @@ function mergeOfferUpdate(prior: OfferRecord | null, update: ProgressiveOfferUpd
     ...(prior ?? {
       id: "", marketId: "", carrierId: "", carrierLabel: "", callId: null, version: 0,
       availability: "UNKNOWN" as const, price: null, currency: defaultCurrency, rateAllIn: null,
+      normalizedPrice: null, normalizedCurrency: defaultCurrency, exchangeRate: null, exchangeRateSource: null,
       pickupTime: null, expectedArrival: null, firm: null, expiresAt: null, accessorials: [], carrierConditions: [],
       confirmedRequirements: [], rawStatement: null, confidence: null, humanRequired: false, humanReason: null,
       rejectedRequirements: [],
@@ -993,14 +1629,80 @@ function workflowStatus(action: MarketInstruction, call: ReturnType<MarketlineRe
 
 function sessionState(action: MarketInstruction["action"]): string {
   if (action === "HUMAN_REQUIRED") return "HUMAN";
+  if (action === "AWARD") return "AWARDED";
   if (action === "RELEASE") return "RELEASED";
   if (action === "NEGOTIATE") return "NEGOTIATING";
   if (action === "HOLD" || action === "CONFIRM") return "WAITING_FOR_MARKET";
   return "DISCOVERY";
 }
 
+function instructionForPersistence(
+  action: MarketInstruction["action"],
+  reason: string,
+  marketRevision: number,
+): MarketInstruction {
+  return { action, reason, field: null, targetPrice: null, targetArrival: null, marketRevision };
+}
+
 function violationDistance(offer: OfferRecord): number {
-  return offer.feasibilityViolations.reduce((total, violation) => total + (violation.delta === null ? 1_000_000_000 : Math.abs(violation.delta)), 0);
+  return offer.feasibilityViolations.reduce((total, violation) => {
+    if (violation.delta === null) return total + 1_000;
+    if (violation.code === "MAXIMUM_PRICE" && typeof violation.limit === "number" && violation.limit > 0) {
+      return total + Math.abs(violation.delta) / violation.limit;
+    }
+    if (["MANDATORY_PICKUP", "MANDATORY_ARRIVAL"].includes(violation.code)) {
+      return total + Math.abs(violation.delta) / 3_600_000;
+    }
+    return total + Math.abs(violation.delta);
+  }, 0);
+}
+
+const BANXICO_USD_MXN_FIX_2026_08_28 = 17.0427;
+
+function defaultExchangeRates(standardCurrency: string): Record<string, number> {
+  const standard = standardCurrency.toUpperCase();
+  if (standard === "MXN") return { MXN: 1, USD: BANXICO_USD_MXN_FIX_2026_08_28 };
+  if (standard === "USD") return { USD: 1, MXN: 1 / BANXICO_USD_MXN_FIX_2026_08_28 };
+  return { [standard]: 1 };
+}
+
+function defaultExchangeRateSource(standardCurrency: string): string | null {
+  return ["MXN", "USD"].includes(standardCurrency.toUpperCase())
+    ? "Banco de México FIX 2026-08-28 default; configurable per order"
+    : null;
+}
+
+function normalizeExchangeRates(standardCurrency: string, configured?: Record<string, number>): Record<string, number> {
+  const standard = standardCurrency.toUpperCase();
+  const rates = { ...defaultExchangeRates(standard) };
+  for (const [currency, rate] of Object.entries(configured ?? {})) {
+    if (/^[A-Za-z]{3}$/.test(currency) && Number.isFinite(rate) && rate > 0) rates[currency.toUpperCase()] = rate;
+  }
+  rates[standard] = 1;
+  return rates;
+}
+
+function normalizeMandate(raw: Partial<MandateSnapshot> & Pick<MandateSnapshot, "currency">): MandateSnapshot {
+  const currency = String(raw.currency || "MXN").toUpperCase();
+  return {
+    ...raw,
+    currency,
+    preferredPickup: raw.preferredPickup ?? null,
+    mustPickupBy: raw.mustPickupBy ?? null,
+    exchangeRates: normalizeExchangeRates(currency, raw.exchangeRates),
+    exchangeRateSource: raw.exchangeRateSource ?? defaultExchangeRateSource(currency),
+  } as MandateSnapshot;
+}
+
+function jsonNumberRecord(value: unknown): Record<string, number> | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = typeof value === "string" ? JSON.parse(value) : value;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    return Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, number] => typeof entry[1] === "number"));
+  } catch {
+    return undefined;
+  }
 }
 
 function toCommitment(row: Row): CommitmentRecord {
@@ -1009,6 +1711,87 @@ function toCommitment(row: Row): CommitmentRecord {
     carrierId: String(row.carrier_id), carrierLabel: String(row.carrier_label), status: String(row.status) as CommitmentRecord["status"],
     createdAt: String(row.created_at), invalidatedAt: nullableString(row.invalidated_at), invalidationReason: nullableString(row.invalidation_reason),
   };
+}
+
+function toAmendment(row: Row): AmendmentRecord {
+  return {
+    id: String(row.id),
+    orderId: String(row.order_id),
+    commitmentId: String(row.commitment_id),
+    callId: nullableString(row.call_id),
+    carrierLabel: String(row.carrier_label),
+    status: String(row.status) as AmendmentRecord["status"],
+    originalTerms: jsonAmendmentTerms(row.original_terms),
+    requestedTerms: jsonAmendmentTerms(row.requested_terms),
+    finalTerms: row.final_terms ? jsonAmendmentTerms(row.final_terms) : null,
+    violations: jsonArray(row.violations) as AmendmentRecord["violations"],
+    decisionReason: nullableString(row.decision_reason),
+    recoveryMarketId: nullableString(row.recovery_market_id),
+    createdAt: String(row.created_at),
+    resolvedAt: nullableString(row.resolved_at),
+  };
+}
+
+function amendmentTerms(offer: OfferRecord): AmendmentTerms {
+  return {
+    price: offer.price,
+    currency: offer.currency,
+    pickupTime: offer.pickupTime,
+    expectedArrival: offer.expectedArrival,
+  };
+}
+
+function sameAmendmentTerms(left: AmendmentTerms, right: AmendmentTerms): boolean {
+  return left.price === right.price
+    && left.currency === right.currency
+    && left.pickupTime === right.pickupTime
+    && left.expectedArrival === right.expectedArrival;
+}
+
+function amendmentDecisionFromRecord(
+  amendment: AmendmentRecord,
+  mandate?: MandateSnapshot,
+  revalidation = false,
+): AmendmentDecision {
+  const action: AmendmentDecision["action"] = amendment.status === "ACCEPTED"
+    ? "ACCEPT"
+    : ["PROPOSED", "NEGOTIATING"].includes(amendment.status)
+      ? "NEGOTIATE"
+      : amendment.status === "RECOVERY_REQUIRED"
+        ? revalidation ? "REVALIDATE" : "RECOVER"
+        : "HUMAN_HANDOFF";
+  return {
+    amendment,
+    action,
+    recoveryMarketId: amendment.recoveryMarketId,
+    negotiationTargets: action === "NEGOTIATE" && mandate
+      ? { maximumPrice: mandate.maximumPrice, mustPickupBy: mandate.mustPickupBy, mustArriveBy: mandate.mustArriveBy }
+      : null,
+  };
+}
+
+function jsonAmendmentTerms(value: unknown): AmendmentTerms {
+  const parsed = jsonObject(value);
+  return {
+    price: nullableNumber(parsed.price),
+    currency: nullableString(parsed.currency),
+    pickupTime: nullableString(parsed.pickupTime),
+    expectedArrival: nullableString(parsed.expectedArrival),
+  };
+}
+
+function jsonObject(value: unknown): Row {
+  try {
+    const parsed = typeof value === "string" ? JSON.parse(value) : value;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Row : {};
+  } catch { return {}; }
+}
+
+function jsonArray(value: unknown): unknown[] {
+  try {
+    const parsed = typeof value === "string" ? JSON.parse(value) : value;
+    return Array.isArray(parsed) ? parsed : [];
+  } catch { return []; }
 }
 
 function toEvent(row: Row): OrderEventRecord {
@@ -1056,5 +1839,8 @@ function jsonStringArray(value: unknown): string[] {
     const parsed = JSON.parse(value) as unknown;
     return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
   } catch { return []; }
+}
+function normalizeLocation(value: string): string {
+  return value.trim().toLocaleLowerCase("en-US").replaceAll(/[^a-z0-9]+/g, " ").trim();
 }
 function nullableDate(value: string | null | undefined): string | null { return value?.trim() ? new Date(value).toISOString() : null; }

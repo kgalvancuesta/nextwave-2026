@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { OpenAIRealtimeSIP } from "@openai/agents-realtime";
 import { OpeningResponseCoordinator, REALTIME_INPUT_AUDIO_CONFIG } from "@/lib/volta/openai-agents-runtime";
+import { createVoltaAgent } from "@/lib/volta/agent/volta-agent";
 
 describe("Realtime opening response", () => {
   afterEach(() => vi.useRealTimers());
 
-  it("uses noise reduction and conservative semantic turn detection for phone audio", () => {
+  it("uses SIP-compatible noise reduction with low-eagerness interruption", () => {
     expect(REALTIME_INPUT_AUDIO_CONFIG).toEqual({
       noiseReduction: { type: "far_field" },
       turnDetection: {
@@ -13,6 +15,20 @@ describe("Realtime opening response", () => {
         createResponse: true,
         interruptResponse: true,
       },
+    });
+  });
+
+  it("builds the actual SIP accept payload without unsupported VAD fields", async () => {
+    const agent = createVoltaAgent({ kind: "carrier_quote", instructions: "Collect the carrier offer." });
+    const payload = await OpenAIRealtimeSIP.buildInitialConfig(agent, {
+      model: "gpt-realtime",
+      config: { audio: { input: { ...REALTIME_INPUT_AUDIO_CONFIG } } },
+    });
+
+    expect(payload.audio?.input?.turn_detection).toMatchObject({
+      type: "semantic_vad",
+      eagerness: "low",
+      interrupt_response: true,
     });
   });
 

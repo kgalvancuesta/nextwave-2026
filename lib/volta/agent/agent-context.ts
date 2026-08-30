@@ -12,6 +12,8 @@ export type VoltaCallKind =
   | "carrier_quote"
   /** A call participating in the dashboard's shared procurement market. */
   | "procurement"
+  /** A booked carrier proposing a price or timing change to an active commitment. */
+  | "amendment"
   /** The read-back call with the carrier the policy already selected. */
   | "carrier_confirmation";
 

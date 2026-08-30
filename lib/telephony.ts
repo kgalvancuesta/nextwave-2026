@@ -8,9 +8,15 @@ export interface CreateCallInput {
   internalCallId: string;
 }
 
+export interface CreateNotificationCallInput extends CreateCallInput {
+  message: string;
+}
+
 export interface TelephonyProvider {
   createCall(input: CreateCallInput): Promise<{ callSid: string }>;
+  createNotificationCall?(input: CreateNotificationCallInput): Promise<{ callSid: string }>;
   startRecording(callSid: string): Promise<{ recordingSid: string }>;
+  playMessageAndHangup(callSid: string, message: string): Promise<void>;
 }
 
 export class TwilioTelephonyProvider implements TelephonyProvider {
@@ -45,6 +51,22 @@ export class TwilioTelephonyProvider implements TelephonyProvider {
     return { callSid: call.sid };
   }
 
+  async createNotificationCall(input: CreateNotificationCallInput): Promise<{ callSid: string }> {
+    const response = new twilio.twiml.VoiceResponse();
+    response.say({ voice: "alice" }, input.message);
+    response.hangup();
+    const call = await this.client.calls.create({
+      to: input.to,
+      from: this.config.phoneNumber,
+      twiml: response.toString(),
+      statusCallback: `${this.config.publicBaseUrl}/api/twilio/status?callId=${encodeURIComponent(input.internalCallId)}`,
+      statusCallbackMethod: "POST",
+      statusCallbackEvent: ["initiated", "ringing", "answered", "completed"],
+      timeout: 45,
+    });
+    return { callSid: call.sid };
+  }
+
   async startRecording(callSid: string): Promise<{ recordingSid: string }> {
     const recording = await this.client.calls(callSid).recordings.create({
       recordingChannels: "dual",
@@ -54,6 +76,13 @@ export class TwilioTelephonyProvider implements TelephonyProvider {
       recordingStatusCallbackEvent: ["in-progress", "completed", "absent"],
     });
     return { recordingSid: recording.sid };
+  }
+
+  async playMessageAndHangup(callSid: string, message: string): Promise<void> {
+    const response = new twilio.twiml.VoiceResponse();
+    response.say({ voice: "alice" }, message);
+    response.hangup();
+    await this.client.calls(callSid).update({ twiml: response.toString() });
   }
 }
 
