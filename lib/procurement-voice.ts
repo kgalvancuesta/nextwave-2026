@@ -198,11 +198,17 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
       currentExpectedArrival: before.latestOffer?.expectedArrival ?? null,
     });
     const transcript = evidence?.transcript ?? normalized.rawStatement ?? "";
+    // "Yes, let me check with my dispatcher" opens with an affirmative but
+    // agrees to nothing: the carrier is asking for time. Deciding this before
+    // either affirmative test keeps a stalling turn from confirming a quote or
+    // its required conditions.
+    const pauseRequested = isCarrierPauseRequest(transcript);
+    const affirmed = !pauseRequested && isClearAffirmative(transcript);
 
     // Quote finality is server-owned. The model's required nullable `firm`
     // field must never toggle a quote between confirmed and unconfirmed.
     delete normalized.firm;
-    if (normalized.availability === "AVAILABLE" && isClearAffirmative(transcript)) {
+    if (normalized.availability === "AVAILABLE" && affirmed) {
       // The opening message reads every condition aloud and asks whether the
       // carrier can meet them, so an unqualified yes answers that question --
       // but it can never revive a condition the carrier has explicitly
@@ -217,7 +223,7 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
     }
 
     const explicitFacts = hasMaterialProcurementUpdate(normalized);
-    if (before.instruction.action === "CONFIRM" && isClearAffirmative(transcript)) {
+    if (before.instruction.action === "CONFIRM" && affirmed) {
       normalized.firm = true;
     } else if (explicitFacts) {
       // New or corrected commercial facts require one server-requested recap.
@@ -228,7 +234,6 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
     // content-free tool calls as no-ops so they cannot create a partial offer,
     // advance the market revision, or wake the parallel calls.
     if (!hasMaterialProcurementUpdate(normalized)) {
-      const pauseRequested = isCarrierPauseRequest(transcript);
       return {
         result: {
           ok: true,

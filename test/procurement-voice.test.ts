@@ -529,6 +529,62 @@ describe("dashboard procurement voice bridge", () => {
     expect(runtime.sessionsClosed).toBe(1);
   });
 
+  it("does not lock a quote when the carrier opens with yes but is asking for time", async () => {
+    const { db, repository, markets } = createTestContext();
+    const carrier = repository.createContact({ label: "Baja Carrier", phoneInput: "+12025550116", e164PhoneNumber: "+12025550116" });
+    const workspace = markets.createOrder({
+      name: "Baja4", client: "Nextwave", origin: "Manzanillo", destination: "Monterrey", reference: "BAJA4",
+      currency: "USD", targetPrice: 700, maximumPrice: 900,
+      preferredPickup: "2030-01-10T14:30:00.000Z", mustPickupBy: "2030-01-10T15:00:00.000Z",
+      preferredArrival: "2030-01-11T18:00:00.000Z", mustArriveBy: "2030-01-11T20:00:00.000Z",
+      priceWeight: 0.6, speedWeight: 0.4, minimumValidOffers: 1, desiredCarriers: 1,
+      conditions: ["Tolls included"], carrierIds: [carrier.id],
+    });
+    const marketId = workspace.currentMarket!.market.id;
+    markets.startMarket(marketId);
+    const call = repository.createOutboundBatch([carrier], "+12025550101", { orderId: workspace.order.id, marketId }).calls[0]!;
+    repository.attachTwilioSidIfMissing(call.id, "CA_baja4_pause");
+    const scripted: Array<{ providerCallId: string; message: string }> = [];
+    const pauseTelephony: OutboundTelephonyGateway = {
+      async dial() { return { providerCallId: "CA_unused" }; },
+      async playMessageAndHangup(providerCallId, message) { scripted.push({ providerCallId, message }); },
+    };
+    const runtime = new FakeAgentRuntime();
+    const service = new VoiceControlService(
+      new VoltaStore(db), runtime, pauseTelephony, recap,
+      { fromNumber: "+12025550101", sipUri: "sip:test@sip.api.openai.com", humanEscalationUri: "tel:+12025550121" },
+      new DashboardProcurementVoiceAdapter(markets, () => new Date("2030-01-10T13:00:00.000Z")),
+    );
+    await service.handleOpenAiWebhook({
+      type: "realtime.call.incoming",
+      data: { call_id: "rtc_baja4_pause", sip_headers: [{ name: "X-Internal-Call-ID", value: call.id }] },
+    });
+    const completeOffer = {
+      availability: "AVAILABLE", price: 700, currency: "USD", rateAllIn: true,
+      pickupTime: "2030-01-10T14:30:00.000Z", expectedArrival: "2030-01-11T18:00:00.000Z",
+      firm: false, expiresAt: null, accessorials: [], carrierConditions: [],
+      confirmedRequirements: ["Tolls included"], rejectedRequirements: [],
+      rawStatement: "700 dollars all-in, pickup January 10 at 8:30 AM and arrival January 11 at 12 PM. Tolls included.",
+      confidence: 0.99, humanRequired: false, humanReason: null,
+    };
+
+    expect(await runtime.invokeTool!("record_procurement_update", completeOffer)).toMatchObject({
+      instruction: { action: "CONFIRM" }, terminal: false,
+    });
+    // The turn opens with "Yes" but agrees to nothing: it must stay a no-op and
+    // leave the quote awaiting the recap instead of awarding on a stalling turn.
+    expect(await runtime.invokeTool!("record_procurement_update", {
+      ...completeOffer,
+      availability: "UNKNOWN", price: null, currency: null, rateAllIn: null,
+      pickupTime: null, expectedArrival: null, firm: false,
+      confirmedRequirements: [], rawStatement: "Yes, let me check with my dispatcher.",
+    })).toMatchObject({
+      ok: true, no_change: true, pause_requested: true, instruction: { action: "CONFIRM" },
+    });
+    expect(scripted).toHaveLength(0);
+    expect(markets.getMarketState(marketId)?.carriers[0]?.latestOffer?.firm).toBe(false);
+  });
+
   it("re-briefs the booked carrier with the restricted amendment workflow", () => {
     const { repository, markets } = createTestContext();
     const carrier = repository.createContact({ label: "Booked carrier", phoneInput: "+12025550114", e164PhoneNumber: "+12025550114" });
