@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { callStatusRank, isTerminalCallStatus } from "./call-status";
 import { getDatabase } from "./db";
-import type { CallRecord, CallStatus, Contact, RecordingRecord } from "./types";
+import type { CallRecord, CallStatus, Contact, RecordingRecord, TranscriptTurn } from "./types";
 
 type Row = Record<string, unknown>;
 
@@ -183,6 +183,37 @@ export class MarketlineRepository {
       WHERE calls.volta_operation_id = ? ORDER BY calls.created_at DESC`).all(operationId) as Row[]).map(toCall);
   }
 
+  listTranscriptTurns(limit = 200): TranscriptTurn[] {
+    const rows = this.db.prepare(`SELECT rowid AS event_sequence, id, call_id, type, payload, occurred_at
+      FROM volta_call_events
+      WHERE type IN ('transcript.turn', 'transcript.assistant', 'agent.turn_completed')
+      ORDER BY occurred_at DESC, event_sequence DESC LIMIT ?`).all(limit * 2) as Row[];
+    const turns: TranscriptTurn[] = [];
+    for (const row of rows.reverse()) {
+      const payload = parseObject(row.payload);
+      const text = typeof payload.transcript === "string" ? payload.transcript.trim() : "";
+      if (!text) continue;
+      const speaker = String(row.type) === "transcript.turn" ? "CALLER" : "AGENT";
+      const turn: TranscriptTurn = {
+        id: String(row.id),
+        callId: String(row.call_id),
+        speaker,
+        text,
+        occurredAt: String(row.occurred_at),
+        itemId: nullableString(payload.itemId),
+        responseId: nullableString(payload.responseId),
+      };
+      const previous = turns.at(-1);
+      if (previous && previous.callId === turn.callId && previous.speaker === turn.speaker
+        && previous.text === turn.text && Math.abs(Date.parse(turn.occurredAt) - Date.parse(previous.occurredAt)) < 5_000) {
+        if (String(row.type) === "transcript.assistant") turns[turns.length - 1] = turn;
+        continue;
+      }
+      turns.push(turn);
+    }
+    return turns.slice(-limit);
+  }
+
   upsertInboundCall(input: {
     twilioCallSid: string;
     fromNumber: string;
@@ -342,3 +373,11 @@ function toRecording(row: Row): RecordingRecord {
 
 function nullableString(value: unknown): string | null { return value === null || value === undefined ? null : String(value); }
 function nullableNumber(value: unknown): number | null { return value === null || value === undefined ? null : Number(value); }
+function parseObject(value: unknown): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(String(value)) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}

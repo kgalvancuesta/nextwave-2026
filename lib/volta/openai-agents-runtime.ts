@@ -4,6 +4,7 @@ import type { AgentCallProfile, AgentToolInvoker, VoltaAgentContext } from "./ag
 import { voltaOutputGuardrails } from "./agent/agent-guardrails";
 import { createVoltaAgent } from "./agent/volta-agent";
 import type { AgentCallSession, RealtimeAgentGateway } from "./ports";
+import { voiceError, voiceLog } from "@/lib/voice-log";
 
 export interface OpenAiAgentsRuntimeOptions {
   apiKey: string | undefined;
@@ -64,6 +65,14 @@ export class OpenAiAgentsRuntime implements RealtimeAgentGateway {
     invokeTool: AgentToolInvoker;
     onAudit: (type: string, payload: unknown) => void;
   }): Promise<AgentCallSession> {
+    voiceLog("info", "realtime.start_requested", {
+      callId: input.callId,
+      realtimeCallId: input.realtimeCallId,
+      agentKind: input.profile.kind,
+      model: this.options.model,
+      transcriptionModel: this.options.transcriptionModel,
+      voice: this.options.voice,
+    });
     const client = this.requireClient();
     const apiKey = this.requireApiKey();
     const agent = createVoltaAgent(input.profile, { voice: this.options.voice });
@@ -97,7 +106,20 @@ export class OpenAiAgentsRuntime implements RealtimeAgentGateway {
     // so the model can never answer with a broader tool surface than the one
     // this call kind allows.
     const acceptPayload = await OpenAIRealtimeSIP.buildInitialConfig<VoltaAgentContext>(agent, sessionOptions);
-    await client.realtime.calls.accept(input.realtimeCallId, acceptPayload);
+    voiceLog("info", "realtime.accept_requested", {
+      callId: input.callId,
+      realtimeCallId: input.realtimeCallId,
+      agentKind: input.profile.kind,
+      inputTranscription: this.options.transcriptionModel,
+      turnDetection: REALTIME_INPUT_AUDIO_CONFIG.turnDetection.type,
+    });
+    try {
+      await client.realtime.calls.accept(input.realtimeCallId, acceptPayload);
+      voiceLog("info", "realtime.accept_succeeded", { callId: input.callId, realtimeCallId: input.realtimeCallId });
+    } catch (error) {
+      voiceLog("error", "realtime.accept_failed", { callId: input.callId, realtimeCallId: input.realtimeCallId, error: voiceError(error) });
+      throw error;
+    }
 
     const session = new RealtimeSession<VoltaAgentContext>(agent, {
       ...sessionOptions,
@@ -108,8 +130,15 @@ export class OpenAiAgentsRuntime implements RealtimeAgentGateway {
       else session.transport.sendEvent({ type: "response.create" });
     });
     wireOpeningResponse(session, opening);
-    wireAudit(session, input.onAudit);
-    await session.connect({ apiKey, callId: input.realtimeCallId });
+    wireAudit(session, input.callId, input.onAudit);
+    voiceLog("info", "realtime.sideband_connecting", { callId: input.callId, realtimeCallId: input.realtimeCallId });
+    try {
+      await session.connect({ apiKey, callId: input.realtimeCallId });
+      voiceLog("info", "realtime.sideband_connected", { callId: input.callId, realtimeCallId: input.realtimeCallId });
+    } catch (error) {
+      voiceLog("error", "realtime.sideband_failed", { callId: input.callId, realtimeCallId: input.realtimeCallId, error: voiceError(error) });
+      throw error;
+    }
 
     return {
       async useProfile(next: AgentCallProfile) {
@@ -254,11 +283,13 @@ function wireOpeningResponse(
 
 /**
  * Everything the agent does that a human reviewer would need after the fact.
- * Tool arguments are not recorded here: the policy layer already persists the
- * validated payload together with its decision.
+ * Validated tool payloads are persisted by the policy layer with its decision;
+ * only the raw argument string is captured here, from the transport event, so
+ * a call the SDK rejected before execution is still reviewable.
  */
 function wireAudit(
   session: RealtimeSession<VoltaAgentContext>,
+  callId: string,
   onAudit: (type: string, payload: unknown) => void,
 ): void {
   session.on("agent_tool_start", (_context, _agent, agentTool) => {
@@ -280,8 +311,29 @@ function wireAudit(
     onAudit("agent.error", { error: describe(error.error) });
   });
   session.on("transport_event", (event) => {
+    voiceLog(event.type === "error" || event.type.endsWith(".failed") ? "error" : "info", "realtime.server_event", {
+      callId,
+      ...summarizeRealtimeEvent(event as unknown as Record<string, unknown>),
+    });
     if (event.type === "conversation.item.input_audio_transcription.completed") {
       onAudit("transcript.turn", { itemId: event.item_id, transcript: event.transcript });
+    } else if (event.type === "conversation.item.input_audio_transcription.failed") {
+      onAudit("transcript.failed", { itemId: event.item_id, error: event.error });
+    } else if (event.type === "response.output_audio_transcript.done") {
+      onAudit("transcript.assistant", {
+        itemId: event.item_id,
+        responseId: event.response_id,
+        transcript: event.transcript,
+      });
+    } else if (event.type === "response.function_call_arguments.done") {
+      // The raw argument string is the only evidence left when the SDK rejects
+      // a call as invalid JSON before any tool code runs.
+      onAudit("agent.tool_arguments", {
+        itemId: event.item_id,
+        toolCallId: event.call_id,
+        tool: event.name,
+        arguments: event.arguments,
+      });
     } else if (event.type === "input_audio_buffer.speech_started") {
       onAudit("audio.input_started", { itemId: event.item_id, audioStartMs: event.audio_start_ms });
     } else if (event.type === "input_audio_buffer.speech_stopped") {
@@ -294,6 +346,30 @@ function wireAudit(
       });
     }
   });
+}
+
+function summarizeRealtimeEvent(event: Record<string, unknown>): Record<string, unknown> {
+  const type = typeof event.type === "string" ? event.type : "unknown";
+  const summary: Record<string, unknown> = { type };
+  for (const key of ["event_id", "item_id", "response_id", "call_id", "name", "output_index", "content_index", "audio_start_ms", "audio_end_ms"]) {
+    if (event[key] !== undefined) summary[key] = event[key];
+  }
+  if (typeof event.arguments === "string") summary.arguments = event.arguments;
+  if (typeof event.transcript === "string") summary.transcript = event.transcript;
+  if (typeof event.delta === "string") {
+    summary.delta = type.includes("transcript") ? event.delta : `[OMITTED ${event.delta.length} chars]`;
+  }
+  if (event.error !== undefined) summary.error = event.error;
+  if (event.response && typeof event.response === "object") {
+    const response = event.response as Record<string, unknown>;
+    summary.response = {
+      id: response.id,
+      status: response.status,
+      status_details: response.status_details,
+      usage: response.usage,
+    };
+  }
+  return summary;
 }
 
 function describe(error: unknown): string {

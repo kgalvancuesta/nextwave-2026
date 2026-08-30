@@ -51,6 +51,16 @@ export interface CallRecord {
   updatedAt: string;
 }
 
+export interface TranscriptTurn {
+  id: string;
+  callId: string;
+  speaker: "CALLER" | "AGENT";
+  text: string;
+  occurredAt: string;
+  itemId: string | null;
+  responseId: string | null;
+}
+
 export interface RecordingRecord {
   id: string;
   twilioRecordingSid: string;

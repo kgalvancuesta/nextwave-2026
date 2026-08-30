@@ -11,6 +11,7 @@ export async function GET() {
       activeCalls: calls.filter((call) => isActiveCallStatus(call.status)),
       recentCalls: calls.filter((call) => !isActiveCallStatus(call.status)),
       inboundState: deriveInboundCallState(calls),
+      transcriptTurns: getRepository().listTranscriptTurns(),
     });
   } catch (error) {
     return apiError(error);

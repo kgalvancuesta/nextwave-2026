@@ -2,6 +2,7 @@ import { loadVoltaConfig } from "@/lib/config";
 import { apiError } from "@/lib/http";
 import { OpenAiAgentsRuntime } from "@/lib/volta/openai-agents-runtime";
 import { getVoiceControlService } from "@/lib/volta/service";
+import { voiceError, voiceLog } from "@/lib/voice-log";
 
 export const runtime = "nodejs";
 
@@ -12,6 +13,12 @@ export const runtime = "nodejs";
  */
 export async function POST(request: Request) {
   try {
+    const requestId = request.headers.get("x-request-id") || request.headers.get("webhook-id");
+    voiceLog("info", "openai.webhook_received", {
+      requestId,
+      contentType: request.headers.get("content-type"),
+      contentLength: request.headers.get("content-length"),
+    });
     const config = loadVoltaConfig();
     const rawBody = await request.text();
     const headers = Object.fromEntries(request.headers.entries());
@@ -28,12 +35,20 @@ export async function POST(request: Request) {
       event = await verifier.verifyWebhook(rawBody, headers);
     } catch (error) {
       const reason = error instanceof Error ? error.message : "Unknown signature verification error";
-      console.warn(`Rejected OpenAI webhook: ${reason}`);
+      voiceLog("warn", "openai.webhook_rejected", { requestId, reason });
       return Response.json({ error: "Invalid OpenAI webhook signature." }, { status: 400 });
     }
-
-    return Response.json(await getVoiceControlService().handleOpenAiWebhook(event));
+    const verified = event as { type?: unknown; data?: { call_id?: unknown } };
+    voiceLog("info", "openai.webhook_verified", {
+      requestId,
+      type: verified.type,
+      realtimeCallId: verified.data?.call_id,
+    });
+    const result = await getVoiceControlService().handleOpenAiWebhook(event);
+    voiceLog("info", "openai.webhook_handled", { requestId, result });
+    return Response.json(result);
   } catch (error) {
+    voiceLog("error", "openai.webhook_failed", { error: voiceError(error) });
     return apiError(error);
   }
 }

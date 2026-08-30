@@ -22,6 +22,7 @@ import type {
   ProcurementVoicePort,
   ProcurementControlUpdate,
 } from "./ports";
+import { voiceLog } from "@/lib/voice-log";
 
 interface ServiceOptions {
   /** The Twilio sender every negotiation call is placed from. */
@@ -231,11 +232,21 @@ export class VoiceControlService {
 
   async handleOpenAiWebhook(eventInput: unknown): Promise<{ callId?: string; ignored?: boolean }> {
     const event = incomingEventSchema.parse(eventInput);
-    if (event.type !== "realtime.call.incoming") return { ignored: true };
+    if (event.type !== "realtime.call.incoming") {
+      voiceLog("info", "control.webhook_ignored", { type: event.type });
+      return { ignored: true };
+    }
 
     const realtimeCallId = event.data.call_id;
+    voiceLog("info", "control.incoming_call", {
+      realtimeCallId,
+      sipHeaderNames: event.data.sip_headers.map((header) => header.name.toLowerCase()),
+    });
     const existingRealtimeCall = this.store.findCallByRealtimeId(realtimeCallId);
-    if (existingRealtimeCall) return { callId: existingRealtimeCall.id };
+    if (existingRealtimeCall) {
+      voiceLog("info", "control.call_already_attached", { realtimeCallId, callId: existingRealtimeCall.id });
+      return { callId: existingRealtimeCall.id };
+    }
 
     const headers = new Map(event.data.sip_headers.map((header) => [header.name.toLowerCase(), header.value]));
     const internalCallId = cleanHeader(headers.get("x-internal-call-id"));
@@ -243,6 +254,12 @@ export class VoiceControlService {
     const from = headers.get("from") ?? null;
 
     let call = internalCallId ? this.store.getCall(internalCallId) : null;
+    voiceLog("info", "control.call_correlation", {
+      realtimeCallId,
+      requestedInternalCallId: internalCallId ?? null,
+      requestedOperationId: operationId ?? null,
+      matchedExistingCall: Boolean(call),
+    });
     if (!call) {
       const operation = operationId ? this.store.getOperation(operationId) : null;
       call = this.store.createCall({
@@ -264,13 +281,39 @@ export class VoiceControlService {
 
     const attachedCallId = call.id;
     const profile = this.buildCallProfile(call);
+    voiceLog("info", "control.profile_selected", {
+      callId: attachedCallId,
+      realtimeCallId,
+      agentKind: profile.kind,
+      correlated: Boolean(call.operationId),
+      direction: call.direction,
+    });
     const session = await this.realtime.startCall({
       realtimeCallId,
       callId: attachedCallId,
       profile,
-      invokeTool: (name, args) => this.executeAgentTool(attachedCallId, name, args),
+      invokeTool: async (name, args) => {
+        voiceLog("info", "control.tool_invocation_requested", { callId: attachedCallId, name, args });
+        try {
+          const result = await this.executeAgentTool(attachedCallId, name, args);
+          voiceLog("info", "control.tool_invocation_completed", { callId: attachedCallId, name, result });
+          return result;
+        } catch (error) {
+          voiceLog("error", "control.tool_invocation_failed", {
+            callId: attachedCallId,
+            name,
+            error: errorMessage(error),
+          });
+          throw error;
+        }
+      },
       onAudit: (type, payload) => {
         this.store.appendEvent(attachedCallId, type, payload);
+        voiceLog(type.includes("error") || type.includes("failed") ? "error" : "info", "control.audit_persisted", {
+          callId: attachedCallId,
+          type,
+          payload,
+        });
         const evidence = carrierTurnEvidence(type, payload);
         if (evidence) this.latestCarrierTurns.set(attachedCallId, evidence);
       },
@@ -282,6 +325,7 @@ export class VoiceControlService {
       correlated: Boolean(call.operationId),
     });
     session.requestResponse();
+    voiceLog("info", "control.opening_requested", { callId: attachedCallId, realtimeCallId });
     return { callId: attachedCallId };
   }
 

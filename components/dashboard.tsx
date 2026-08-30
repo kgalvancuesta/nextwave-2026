@@ -1,13 +1,13 @@
 "use client";
 
-import { Activity, ArrowDownLeft, ArrowUpRight, Check, Clock3, Pencil, Phone, PhoneCall, PhoneIncoming, Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { Activity, ArrowDownLeft, ArrowUpRight, Check, Clock3, MessageSquareText, Pencil, Phone, PhoneCall, PhoneIncoming, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { NewOrderModal } from "@/components/new-order-modal";
 import { OrderWorkspaceCard } from "@/components/order-workspace";
 import { errorMessage, requestJson } from "@/lib/client-http";
 import { dashboardViewFromSearch, type DashboardView } from "@/lib/dashboard-view";
 import type { OrderWorkspace } from "@/lib/market-types";
-import type { CallRecord, Contact, InboundCallState } from "@/lib/types";
+import type { CallRecord, Contact, InboundCallState, TranscriptTurn } from "@/lib/types";
 
 type OrderFilter = "ALL" | "ACTIVE" | "SOURCING" | "COMMITTED" | "EXCEPTIONS" | "PAST";
 interface ContactDraft { label: string; phoneNumber: string; note: string }
@@ -30,6 +30,7 @@ export function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [inboundState, setInboundState] = useState<InboundCallState>("idle");
+  const [transcriptTurns, setTranscriptTurns] = useState<TranscriptTurn[]>([]);
   const [, setTick] = useState(0);
 
   const loadContacts = useCallback(async () => {
@@ -42,12 +43,13 @@ export function Dashboard() {
     try {
       const [orderData, callData] = await Promise.all([
         requestJson<{ orders: OrderWorkspace[] }>("/api/orders"),
-        requestJson<{ activeCalls: CallRecord[]; recentCalls: CallRecord[]; inboundState: InboundCallState }>("/api/calls"),
+        requestJson<{ activeCalls: CallRecord[]; recentCalls: CallRecord[]; inboundState: InboundCallState; transcriptTurns: TranscriptTurn[] }>("/api/calls"),
       ]);
       setOrders(orderData.orders);
       setActiveCalls(callData.activeCalls);
       setRecentCalls(callData.recentCalls);
       setInboundState(callData.inboundState ?? "idle");
+      setTranscriptTurns(callData.transcriptTurns ?? []);
       setConnected(true);
     } catch (cause) { setConnected(false); throw cause; }
   }, []);
@@ -135,6 +137,8 @@ export function Dashboard() {
         <div className="rounded-2xl bg-[var(--ink)] p-5 text-white shadow-[0_10px_40px_rgba(19,35,31,.14)]"><div className="mb-5 flex items-center justify-between"><div><p className="eyebrow text-white/50">Call activity</p><h3 className="mt-1 text-2xl font-semibold">Active calls</h3></div><Activity className="text-[var(--signal)]" /></div>{activeCalls.length === 0 ? <div className="flex min-h-52 flex-col items-center justify-center rounded-xl border border-dashed border-white/15 bg-white/[.03] px-6 text-center"><Check className="mb-3 text-white/35" size={26} /><p className="font-semibold text-white/80">No active calls</p><p className="mt-1 max-w-xs text-sm text-white/45">Only requested, ringing, and in-progress calls appear here.</p></div> : <div className="space-y-3">{activeCalls.map((call) => <ActiveCallCard key={call.id} call={call} />)}</div>}<div className="mt-5 border-t border-white/10 pt-4 font-mono text-xs text-white/45">Refreshes every 1.5 seconds</div></div>
       </div></section>
 
+      <TranscriptPanel turns={transcriptTurns} calls={[...activeCalls, ...recentCalls]} />
+
       <section className="surface-panel mt-5"><div className="mb-4 flex items-center justify-between"><div><p className="eyebrow">Audit trail</p><h2 className="mt-1 text-2xl font-semibold tracking-tight">Recent calls</h2></div><Clock3 className="text-[var(--muted)]" /></div>{recentCalls.length === 0 ? <div className="rounded-xl bg-[var(--paper)] px-5 py-10 text-center text-sm text-[var(--muted)]">Completed and unsuccessful calls will appear here.</div> : <div className="overflow-x-auto"><table className="w-full min-w-[720px] border-collapse text-left text-sm"><thead><tr className="border-b border-[var(--line)] font-mono text-[11px] uppercase tracking-wider text-[var(--muted)]"><th className="pb-3 font-normal">Time</th><th className="pb-3 font-normal">Contact</th><th className="pb-3 font-normal">Context</th><th className="pb-3 font-normal">Status</th><th className="pb-3 font-normal">Duration</th><th className="pb-3 font-normal">Detail</th></tr></thead><tbody>{recentCalls.slice(0, 30).map((call) => <RecentCallRow key={call.id} call={call} />)}</tbody></table></div>}</section>
       </>}
 
@@ -148,6 +152,51 @@ function ContactModal({ editing, draft, setDraft, busy, error, onClose, onSubmit
 function ActiveCallCard({ call }: { call: CallRecord }) { const label = call.contactLabel || (call.direction === "INBOUND" ? call.fromNumber : call.toNumber); const phone = call.direction === "INBOUND" ? call.fromNumber : call.toNumber; return <div className="flex items-center gap-4 rounded-xl border border-white/10 bg-white/[.06] p-4"><span className={`h-2.5 w-2.5 shrink-0 rounded-full ${call.status === "RINGING" ? "bg-[var(--warning)]" : "bg-[var(--signal)]"}`} /><span className="min-w-0 flex-1"><span className="block truncate font-semibold">{label}</span><span className="font-mono text-xs text-white/50">{phone}</span></span><span className="text-right"><span className="block rounded-full bg-white/10 px-3 py-1 font-mono text-[11px] uppercase tracking-wider">{displayStatus(call.status)}</span><span className="mt-1 block font-mono text-[11px] text-white/45">{formatDuration(elapsedSeconds(call.answeredAt || call.startedAt))}</span></span></div>; }
 function RecentCallRow({ call }: { call: CallRecord }) { const label = call.contactLabel || (call.direction === "INBOUND" ? call.fromNumber : call.toNumber); return <tr className="border-b border-[var(--line)] last:border-0"><td className="py-3.5 font-mono text-xs text-[var(--muted)]">{new Date(call.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td><td className="py-3.5 font-semibold">{label}</td><td className="py-3.5"><span className="inline-flex items-center gap-1.5 text-[var(--muted)]">{call.direction === "INBOUND" ? <ArrowDownLeft size={14} /> : <ArrowUpRight size={14} />}{call.marketId ? "Market call" : call.direction === "INBOUND" ? "Inbound" : "Quick call"}</span></td><td className="py-3.5"><StatusBadge status={call.status} /></td><td className="py-3.5 font-mono text-xs">{call.durationSeconds === null ? "—" : formatDuration(call.durationSeconds)}</td><td className="max-w-xs truncate py-3.5 text-xs text-[var(--danger)]" title={call.errorMessage || undefined}>{call.errorMessage || "—"}</td></tr>; }
 function StatusBadge({ status }: { status: CallRecord["status"] }) { const negative = ["FAILED", "BUSY", "NO_ANSWER", "CANCELED"].includes(status); return <span className={`rounded-full px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider ${negative ? "bg-red-50 text-red-800" : "bg-emerald-50 text-emerald-800"}`}>{displayStatus(status)}</span>; }
+
+function TranscriptPanel({ turns, calls }: { turns: TranscriptTurn[]; calls: CallRecord[] }) {
+  const callsById = new Map(calls.map((call) => [call.id, call]));
+  const visible = turns.slice(-100);
+  return (
+    <section className="surface-panel mt-5">
+      <div className="mb-4 flex items-start justify-between gap-4">
+        <div>
+          <p className="eyebrow">Realtime conversation</p>
+          <h2 className="mt-1 text-2xl font-semibold tracking-tight">Transcript</h2>
+          <p className="mt-1 text-sm text-[var(--muted)]">Final caller and agent turns appear here and remain available after the call.</p>
+        </div>
+        <MessageSquareText className="text-[var(--muted)]" />
+      </div>
+      {visible.length === 0 ? (
+        <div className="rounded-xl bg-[var(--paper)] px-5 py-10 text-center text-sm text-[var(--muted)]">
+          Transcript turns will appear after speech is recognized.
+        </div>
+      ) : (
+        <div className="max-h-[34rem] space-y-3 overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--paper)] p-3" aria-live="polite">
+          {visible.map((turn) => {
+            const call = callsById.get(turn.callId);
+            const label = call?.contactLabel || (call ? (call.direction === "INBOUND" ? call.fromNumber : call.toNumber) : `Call ${turn.callId.slice(0, 8)}`);
+            const agent = turn.speaker === "AGENT";
+            return (
+              <article key={turn.id} className={`flex ${agent ? "justify-end" : "justify-start"}`}>
+                <div className={`max-w-[88%] rounded-xl px-4 py-3 shadow-sm ${agent ? "bg-[var(--ink)] text-white" : "border border-[var(--line)] bg-white text-[var(--ink)]"}`}>
+                  <div className={`mb-1 flex flex-wrap items-center gap-x-2 font-mono text-[10px] uppercase tracking-wider ${agent ? "text-white/55" : "text-[var(--muted)]"}`}>
+                    <span>{agent ? "Marketline agent" : "Caller"}</span>
+                    <span>·</span>
+                    <span>{label}</span>
+                    <span>·</span>
+                    <time dateTime={turn.occurredAt}>{new Date(turn.occurredAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time>
+                  </div>
+                  <p className="whitespace-pre-wrap text-sm leading-6">{turn.text}</p>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
+      <p className="mt-3 font-mono text-[11px] text-[var(--muted)]">Polling durable transcript every 1.5 seconds · showing latest 100 turns</p>
+    </section>
+  );
+}
 function LifecycleCount({ label, value, tone }: { label: string; value: number; tone: string }) { return <div className="rounded-xl border border-[var(--line)] bg-white px-4 py-3"><div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full status-dot-${tone}`} /><span className="font-mono text-[10px] uppercase tracking-wider text-[var(--muted)]">{label}</span></div><p className="mt-1 text-2xl font-semibold">{value}</p></div>; }
 function Field({ label, error, children }: { label: string; error?: string; children: React.ReactNode }) { return <label className="block"><span className="mb-1.5 block text-sm font-semibold">{label}</span>{children}{error && <span className="mt-1.5 block text-sm font-medium text-red-700">{error}</span>}</label>; }
 function matchesFilter(workspace: OrderWorkspace, filter: OrderFilter): boolean { const status = workspace.order.lifecycleStatus; if (filter === "ALL") return true; if (filter === "ACTIVE") return !["COMPLETED", "ARCHIVED", "CANCELED"].includes(status); if (filter === "SOURCING") return ["SOURCING", "NEGOTIATING"].includes(status); if (filter === "COMMITTED") return ["COMMITTED", "IN_PROCESS"].includes(status); if (filter === "EXCEPTIONS") return ["EXCEPTION", "CANCELED"].includes(status); return ["COMPLETED", "ARCHIVED"].includes(status); }
