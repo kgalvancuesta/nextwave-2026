@@ -231,8 +231,9 @@ describe("dashboard procurement voice bridge", () => {
     expect(runtime.profile?.instructions).toContain("concise freight procurement agent");
     expect(runtime.profile?.instructions).toContain("What destination arrival time can you commit to, and what is your all-in price in USD?");
     expect(runtime.profile?.instructions).toContain("CONFIRM: recap once");
-    expect(runtime.profile?.instructions).toContain("Never negotiate or counter.");
-    expect(runtime.profile?.instructions).toContain("The server compares locked quotes and chooses the best feasible one.");
+    expect(runtime.profile?.instructions).toContain("NEGOTIATE: the server has already compared every carrier");
+    expect(runtime.profile?.instructions).toContain("Never negotiate on pickup or arrival");
+    expect(runtime.profile?.instructions).toContain("never negotiate or counter on your own — the server compares locked quotes and chooses the best feasible one.");
     expect(runtime.profile?.instructions).toContain("Server action:");
     expect(runtime.profile?.instructions).not.toContain("retained offer exactly as stated");
     expect(runtime.profile?.instructions).not.toContain("get_procurement_instruction");
@@ -513,11 +514,24 @@ describe("dashboard procurement voice bridge", () => {
     expect(await runtime.invokeTool!("record_procurement_update", completeOffer)).toMatchObject({
       instruction: { action: "CONFIRM" }, terminal: false,
     });
+    // Locking the quote makes it the sole frontier offer, which earns one
+    // negotiation round before the market can award it — a lone carrier is
+    // not exempt from the same "ask once for a better price" pass a crowded
+    // market would give it.
     expect(await runtime.invokeTool!("record_procurement_update", {
       ...completeOffer,
       availability: "UNKNOWN", price: null, currency: null, rateAllIn: null,
       pickupTime: null, expectedArrival: null, firm: false,
       confirmedRequirements: [], rawStatement: "Yes.",
+    })).toMatchObject({
+      instruction: { action: "NEGOTIATE", field: "price" }, terminal: false,
+    });
+    // Restates the same price rather than nulling every field: a content-free
+    // reply is a no-op that never reaches the deterministic layer at all, so
+    // "no, that stands" has to be a material fact to actually spend the round.
+    expect(await runtime.invokeTool!("record_procurement_update", {
+      ...completeOffer,
+      firm: false, rawStatement: "No, 700 is already our best rate.",
     })).toMatchObject({
       instruction: { action: "AWARD" }, terminal: true, scripted_message_dispatched: true,
     });

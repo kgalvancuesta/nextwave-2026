@@ -110,7 +110,7 @@ describe("deterministic procurement evaluator", () => {
     expect(speedFirst[0]?.id).toBe("fast");
   });
 
-  it("holds an early quote, then chooses the best feasible quote without counteroffers", () => {
+  it("holds a strong early offer, then changes all carrier actions from one market update", () => {
     const early = evaluateMarket({
       revision: 3,
       status: "NEGOTIATING",
@@ -138,9 +138,8 @@ describe("deterministic procurement evaluator", () => {
         { carrierId: "c", callId: "call-c", callActive: true, callTerminal: false, negotiationRounds: 0, humanReason: null, offer: offer("c1", "c", 850, "2030-01-10T17:00:00.000Z") },
       ],
     });
-    expect(developed.awardOfferId).toBe("b1");
-    expect(developed.actions.a).toMatchObject({ action: "RELEASE", reason: "market_awarded_to_better_offer" });
-    expect(developed.actions.b).toMatchObject({ action: "AWARD", reason: "best_current_feasible_offer" });
+    expect(developed.actions.a?.action).toBe("NEGOTIATE");
+    expect(developed.actions.b?.action).toBe("NEGOTIATE");
     expect(developed.actions.c).toMatchObject({ action: "RELEASE", reason: "pareto_dominated" });
   });
 

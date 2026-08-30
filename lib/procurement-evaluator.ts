@@ -208,6 +208,7 @@ export function evaluateMarket(input: MarketEvaluationInput): MarketEvaluation {
     return result("CLOSED", false, null, null);
   }
 
+  let negotiationPending = false;
   for (const carrier of input.carriers) {
     const offer = byCarrier.get(carrier.carrierId) ?? null;
     if (carrier.humanReason || offer?.humanRequired) {
@@ -254,12 +255,22 @@ export function evaluateMarket(input: MarketEvaluationInput): MarketEvaluation {
       actions[carrier.carrierId] = instruction("HOLD", "nondominated_offer_waiting_for_market", input.revision);
       continue;
     }
-    actions[carrier.carrierId] = instruction("HOLD", "quote_ready_for_comparison", input.revision);
+    // One round of counter before the market closes: a frontier offer that has
+    // not yet negotiated gets exactly one server-computed target before it can
+    // be awarded. `negotiationRounds` is incremented by the server whenever an
+    // evaluator_action of NEGOTIATE is persisted (see market-service.ts), so a
+    // stale re-evaluation can never grant a second round.
+    if (carrier.callActive && carrier.negotiationRounds < 1 && !timedOut) {
+      actions[carrier.carrierId] = negotiationInstruction(input.mandate, offer, ranked, input.revision);
+      negotiationPending = true;
+      continue;
+    }
+    actions[carrier.carrierId] = instruction("HOLD", "frontier_negotiation_complete", input.revision);
   }
 
   const humanActive = input.carriers.some((carrier) => carrier.humanReason || byCarrier.get(carrier.carrierId)?.humanRequired);
   const enoughOffers = feasibleComparable.length >= input.mandate.minimumValidOffers || (discoveryComplete && feasibleComparable.length > 0);
-  const awardReady = input.automaticAward && discoveryComplete && enoughOffers && !humanActive;
+  const awardReady = input.automaticAward && discoveryComplete && enoughOffers && !negotiationPending && !humanActive;
   const awardOfferId = awardReady ? ranked[0]?.id ?? null : null;
 
   if (awardOfferId) {
@@ -390,6 +401,30 @@ function isDiscoveryResolved(carrier: MarketEvaluationCarrier, offer: EvaluatedP
   if (carrier.humanReason || carrier.callTerminal) return true;
   if (!offer) return false;
   return offer.availability === "UNAVAILABLE" || offer.comparable || (offer.firm === true && !offer.feasible);
+}
+
+/**
+ * The one place a counter-offer gets computed — price only, never arrival: a
+ * single "can you do better on price" ask is simple to script and to verify;
+ * negotiating a committed arrival time as well doubles what the model has to
+ * track for one round of very limited value. The model is told to use only
+ * this target and never invent its own (DECISIONS.md #9) — a mandate bounds
+ * the outcome but not the path, and the server is the only party that can see
+ * the whole market at once.
+ */
+function negotiationInstruction(
+  mandate: MandateSnapshot,
+  offer: EvaluatedProcurementOffer,
+  ranked: EvaluatedProcurementOffer[],
+  revision: number,
+): MarketInstruction {
+  const lowestPrice = Math.min(...ranked.map((candidate) => candidate.price ?? Infinity));
+  const priceGap = Math.max(0, (offer.price ?? lowestPrice) - Math.min(mandate.targetPrice, lowestPrice));
+  return {
+    ...instruction("NEGOTIATE", "improve_price_on_frontier", revision),
+    field: "price",
+    targetPrice: Math.max(0, Math.round((offer.price ?? mandate.targetPrice) - Math.max(1, priceGap || (offer.price ?? 0) * 0.05))),
+  };
 }
 
 function instruction(action: EvaluatorAction, reason: string, marketRevision: number): MarketInstruction {
