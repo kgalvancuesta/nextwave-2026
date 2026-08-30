@@ -65,7 +65,7 @@ describe("shared procurement workflow", () => {
     expect(carrier.latestCall?.errorMessage).toMatch(/not allowed/);
   });
 
-  it("streams partial facts, holds an early offer, prunes, detects staleness, and awards only after a negotiation round", () => {
+  it("streams partial facts, holds early quotes, then compares and awards the best one", () => {
     const { markets, carriers, calls } = setup();
 
     let state = markets.recordProgressiveOfferForCall(calls[0]!.id, {
@@ -79,23 +79,19 @@ describe("shared procurement workflow", () => {
 
     state = markets.recordProgressiveOfferForCall(calls[0]!.id, completeOffer(760, "2030-01-10T15:30:00.000Z"));
     expect(state.carriers.find((carrier) => carrier.carrier.id === carriers[0]!.id)?.status).toBe("WAITING");
+    const staleRevision = state.carriers.find((carrier) => carrier.carrier.id === carriers[0]!.id)!.instruction.marketRevision;
 
     markets.recordProgressiveOfferForCall(calls[1]!.id, completeOffer(700, "2030-01-10T16:00:00.000Z"));
-    state = markets.recordProgressiveOfferForCall(calls[2]!.id, completeOffer(850, "2030-01-10T17:00:00.000Z"));
+    state = markets.recordProgressiveOfferForCall(calls[2]!.id, completeOffer(640, "2030-01-10T15:00:00.000Z"));
     const fedex = state.carriers.find((carrier) => carrier.carrier.id === carriers[0]!.id)!;
     const ups = state.carriers.find((carrier) => carrier.carrier.id === carriers[1]!.id)!;
     const dhl = state.carriers.find((carrier) => carrier.carrier.id === carriers[2]!.id)!;
-    expect(fedex.instruction.action).toBe("NEGOTIATE");
-    expect(ups.instruction.action).toBe("NEGOTIATE");
-    expect(dhl.instruction).toMatchObject({ action: "RELEASE", reason: "pareto_dominated" });
-    const staleRevision = fedex.instruction.marketRevision;
-
-    state = markets.recordProgressiveOfferForCall(calls[2]!.id, completeOffer(650, "2030-01-10T15:00:00.000Z"));
-    expect(state.carriers.find((carrier) => carrier.carrier.id === carriers[0]!.id)?.instruction.action).toBe("RELEASE");
-    expect(() => markets.validateCallInstruction(calls[0]!.id, staleRevision, ["NEGOTIATE"]))
+    expect(fedex.instruction.action).toBe("RELEASE");
+    expect(ups.instruction.action).toBe("RELEASE");
+    expect(dhl.instruction.action).toBe("AWARD");
+    expect(() => markets.validateCallInstruction(calls[0]!.id, staleRevision, ["HOLD"]))
       .toThrow(/stale_market_instruction/);
 
-    state = markets.recordProgressiveOfferForCall(calls[2]!.id, completeOffer(640, "2030-01-10T15:00:00.000Z"));
     expect(state.market.status).toBe("COMMITTED");
     expect(state.activeCommitment?.carrierId).toBe(carriers[2]!.id);
     expect(state.bestOffer).toMatchObject({ carrierId: carriers[2]!.id, price: 640, isValid: true });
