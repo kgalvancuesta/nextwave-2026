@@ -30,6 +30,15 @@ interface ServiceOptions {
   humanEscalationUri: string | undefined;
 }
 
+/**
+ * Spoken when a human is required but the live leg cannot be handed to one.
+ * It commits to a callback, discloses nothing about the order, the market or
+ * the reason, and gives the agent an unambiguous way to end the call.
+ */
+export const HUMAN_CALLBACK_CLOSING =
+  "Thank you. I need a member of our operations team to take this from here. "
+  + "They will call you back on this number shortly. Goodbye.";
+
 const incomingEventSchema = z.object({
   type: z.string(),
   data: z.object({
@@ -420,16 +429,45 @@ export class VoiceControlService {
 
     if (name === "request_human_escalation") {
       const reason = z.string().min(1).parse(args.reason);
+      // The escalation is a policy decision, and it succeeds the moment the
+      // server records it: the lane is paused and the market moves to human
+      // review whether or not a live transfer is possible. Only the delivery
+      // mechanism can fail, and it always has a fallback, because the one
+      // outcome that must never happen is a counterparty left on an open line
+      // with an agent that has no remaining authority.
       const procurement = this.procurement?.markHumanRequired(call.id, reason);
       if (procurement) await this.propagateProcurementUpdates(procurement.controlUpdates);
-      if (!call.realtimeCallId || !this.options.humanEscalationUri) {
-        this.store.appendEvent(call.id, "escalation.failed", { reason, error: "target_not_configured" });
-        return { ok: false, error: "human escalation target is not configured" };
+      const marketRevision = procurementRevision(procurement?.result);
+      const target = this.options.humanEscalationUri;
+
+      if (call.realtimeCallId && target) {
+        try {
+          await this.realtime.transfer(call.realtimeCallId, target);
+          this.store.updateCall(call.id, { status: "transferred", endedAt: new Date().toISOString() });
+          this.store.appendEvent(call.id, "escalation.transferred", { reason, target });
+          return { ok: true, escalated: true, transferred: true, marketRevision };
+        } catch (error) {
+          // A refer that fails mid-call is exactly when the fallback matters.
+          this.store.appendEvent(call.id, "escalation.transfer_failed", {
+            reason, target, error: errorMessage(error),
+          });
+        }
+      } else {
+        this.store.appendEvent(call.id, "escalation.no_transfer_target", { reason });
       }
-      await this.realtime.transfer(call.realtimeCallId, this.options.humanEscalationUri);
-      this.store.updateCall(call.id, { status: "transferred", endedAt: new Date().toISOString() });
-      this.store.appendEvent(call.id, "escalation.transferred", { reason, target: this.options.humanEscalationUri });
-      return { ok: true, transferred: true };
+
+      this.store.appendEvent(call.id, "escalation.callback_promised", { reason });
+      return {
+        ok: true,
+        escalated: true,
+        transferred: false,
+        handoff: "CALLBACK",
+        marketRevision,
+        say: HUMAN_CALLBACK_CLOSING,
+        instruction: procurement
+          ? `Say the 'say' line verbatim, then call finish_procurement_call with marketRevision ${marketRevision ?? "from get_procurement_instruction"} and disposition HUMAN. Do not answer further questions and do not resume negotiating.`
+          : "Say the 'say' line verbatim, then stop. Do not answer further questions and do not resume negotiating.",
+      };
     }
 
     if (name === "propose_commitment") {
@@ -628,6 +666,13 @@ function awardClosing(value: unknown): { result: Record<string, unknown>; closin
   const result = value as Record<string, unknown>;
   if (result.terminal !== true || typeof result.closing_message !== "string" || !result.closing_message.trim()) return null;
   return { result, closingMessage: result.closing_message };
+}
+
+/** The market revision a procurement escalation left behind, when there is one. */
+function procurementRevision(result: unknown): number | null {
+  if (!result || typeof result !== "object") return null;
+  const revision = (result as { market_revision?: unknown }).market_revision;
+  return typeof revision === "number" ? revision : null;
 }
 
 function errorMessage(error: unknown): string {

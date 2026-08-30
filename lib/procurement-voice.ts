@@ -163,6 +163,7 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
         "If the carrier says yes, ask once whether they can cover it and for their all-in rate, pickup time, and destination arrival time. Do not ask them to restate the order recap.",
         `If this is clearly voicemail, wait for the greeting or tone, then leave only: "Hi, this is Luna calling on behalf of Nextwave about order ${reference}. Please call us back when available. Thank you." Do not disclose route, price, constraints, or competitor information, and do not attempt the quote conversation with voicemail.`,
         "Use request_human_escalation only when the carrier asks for a person, introduces terms outside the mandate, or contradicts consequential shipment facts. Do not escalate merely to convert a date, recover from a tool-format error, or clarify a normal missing quote field.",
+        "request_human_escalation always succeeds. If it returns transferred:true you are done. If it returns handoff:\"CALLBACK\", say the returned 'say' line verbatim, then call finish_procurement_call with the returned marketRevision and disposition HUMAN. Never keep a carrier waiting on an open line after escalating.",
       ].join("\n"),
     };
   }
@@ -360,7 +361,11 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
   }
 
   validateFinish(callId: string, marketRevision: number): unknown {
-    const instruction = this.markets.validateCallInstruction(callId, marketRevision, ["RELEASE", "AWARD"]);
+    // HUMAN_REQUIRED is a terminal state for the agent too. Without it here an
+    // escalated call had no legal way to end: the lane was paused, the agent
+    // had no authority left, and finish_procurement_call rejected the only
+    // disposition it could honestly give.
+    const instruction = this.markets.validateCallInstruction(callId, marketRevision, ["RELEASE", "AWARD", "HUMAN_REQUIRED"]);
     return { ok: true, instruction };
   }
 
@@ -759,7 +764,7 @@ function instructionMessage(action: string): string {
     case "HOLD": return "Thank the carrier and ask them to hold briefly while the active market develops.";
     case "NEGOTIATE": return "Use only the returned target and then record the carrier's response.";
     case "RELEASE": return "Thank the carrier, close politely, then finish the call using this exact market revision.";
-    case "HUMAN_REQUIRED": return "Keep the rest of the market running and transfer only this call if configured.";
+    case "HUMAN_REQUIRED": return "This lane is paused for a human. Do not negotiate further. Either you were transferred, or you must say the callback line and finish this call with disposition HUMAN. The rest of the market keeps running.";
     case "AWARD": return "The carrier has been awarded. The server will play the exact scripted terms, queue the written recap, and end the call without further questions.";
     default: return "Continue concise discovery and persist each useful fact.";
   }

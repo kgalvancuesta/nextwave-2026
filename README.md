@@ -110,6 +110,11 @@ behind the same basic-auth proxy as the rest of the dashboard. Set
 `RECORD_CALLS=true` before the call to capture the audio; without it the
 statement and offset are still recorded, but there is nothing to play.
 
+## Decision log
+
+Every significant design decision, the alternative we rejected, and why, is in
+[DECISIONS.md](./DECISIONS.md) — including the limitations we know about.
+
 ## 1. Install and initialize
 
 Requirements: Node.js 22 or newer, npm, a Twilio account, a voice-capable Twilio phone number, and ngrok or another HTTPS tunnel.
@@ -126,8 +131,11 @@ Put the real Twilio values in `secrets/twilio.md` using the exact documented key
 
 For live Realtime calls, also set `OPENAI_API_KEY`, `OPENAI_PROJECT_ID`,
 `OPENAI_WEBHOOK_SECRET`, and `OPENAI_SIP_URI`. The SIP URI is derived from the
-project ID when omitted. `HUMAN_ESCALATION_URI` is optional; without it, a human
-takeover pauses that carrier lane and records the reason without transferring it.
+project ID when omitted. `HUMAN_ESCALATION_URI` is optional: set it and an
+escalation hands the live leg to that number; leave it unset, or let the transfer
+fail, and the escalation is still recorded, the lane is still paused, and the
+agent promises a callback and ends the call. A counterparty is never left on an
+open line with an agent that has no authority left.
 
 Start the app:
 

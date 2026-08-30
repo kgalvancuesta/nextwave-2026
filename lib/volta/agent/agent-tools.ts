@@ -98,7 +98,7 @@ const amendmentArgs = z.object({
 });
 const finishProcurementArgs = z.object({
   marketRevision: z.number().int().nonnegative(),
-  disposition: z.enum(["RELEASE", "COMPLETE"]),
+  disposition: z.enum(["RELEASE", "COMPLETE", "HUMAN"]),
 });
 
 const identifyOperation = tool<typeof identifyOperationArgs, ToolContext, string>({
@@ -135,7 +135,7 @@ const proposeCommitment = tool<typeof commitmentArgs, ToolContext, string>({
 
 const requestHumanEscalation = tool<typeof escalationArgs, ToolContext, string>({
   name: "request_human_escalation",
-  description: "Transfer the live call to a human when identity is uncertain, facts conflict, or a request exceeds the mandate.",
+  description: "Hand the call to a human when identity is uncertain, facts conflict, or a request exceeds the mandate. This always succeeds: it records the escalation and pauses the lane. Check the result -- transferred:true means the leg was handed over and you are done; handoff:\"CALLBACK\" means no live transfer was possible, so say the returned 'say' line verbatim and end the call.",
   parameters: escalationArgs,
   execute: (input, runContext) => invoke(runContext, "request_human_escalation", input),
   errorFunction: toolFailure,
