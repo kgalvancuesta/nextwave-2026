@@ -1219,7 +1219,16 @@ export class OrderMarketService {
     const latestDhlOffer = dhl ? latestCarrierStates.get(dhl.id)?.latestOffer : null;
     if (dhl && dhl.id !== failedCarrierId && latestDhlOffer?.availability !== "UNAVAILABLE") return [dhl.id];
     if (failedCarrierId && includeFailedFallback) return [failedCarrierId];
-    return [];
+    // A market that closed with no offers has no retained quote to fall back
+    // on and no failed carrier to exclude; recovery then means re-dialing the
+    // carriers the order was created with, rather than refusing outright.
+    const originalCarrierIds = (this.db.prepare(
+      "SELECT carrier_id FROM order_carriers WHERE order_id = ? ORDER BY selected_at, carrier_id",
+    ).all(orderId) as Row[])
+      .map((row) => String(row.carrier_id))
+      .filter((carrierId) => carrierId !== failedCarrierId)
+      .slice(0, 3);
+    return originalCarrierIds;
   }
 
   completeOrder(orderId: string): OrderWorkspace {

@@ -231,8 +231,8 @@ describe("dashboard procurement voice bridge", () => {
     expect(runtime.profile?.instructions).toContain("concise freight procurement agent");
     expect(runtime.profile?.instructions).toContain("What destination arrival time can you commit to, and what is your all-in price in USD?");
     expect(runtime.profile?.instructions).toContain("CONFIRM: recap once");
-    expect(runtime.profile?.instructions).toContain("Never negotiate or counter.");
-    expect(runtime.profile?.instructions).toContain("The server compares locked quotes and chooses the best feasible one.");
+    expect(runtime.profile?.instructions).toContain("NEGOTIATE: ask once, plainly");
+    expect(runtime.profile?.instructions).toContain("never negotiate or counter on your own — the server compares locked quotes and chooses the best feasible one.");
     expect(runtime.profile?.instructions).toContain("Server action:");
     expect(runtime.profile?.instructions).not.toContain("retained offer exactly as stated");
     expect(runtime.profile?.instructions).not.toContain("get_procurement_instruction");
@@ -339,9 +339,20 @@ describe("dashboard procurement voice bridge", () => {
       humanRequired: false,
       humanReason: null,
     }) as typeof draft;
-    expect(result).toMatchObject({ ok: true, comparable: true, instruction: { action: "HOLD" } });
+    // Locking the quote earns one "can you go lower?" before it is parked.
+    expect(result).toMatchObject({ ok: true, comparable: true, instruction: { action: "NEGOTIATE", reason: "ask_for_lower_price" } });
 
-    const revisionBeforeHold = (result as typeof result & { market_revision: number }).market_revision;
+    // A flat "no" carries no commercial facts but is the round's answer: it
+    // must reach the market and spend the round instead of being a no-op.
+    const declined = await runtime.invokeTool!("record_procurement_update", {
+      availability: "UNKNOWN", price: null, currency: null, rateAllIn: null,
+      pickupTime: null, expectedArrival: null, firm: null, expiresAt: null,
+      accessorials: [], carrierConditions: [], confirmedRequirements: [], rejectedRequirements: [],
+      rawStatement: "No, that's our best.", confidence: 1, humanRequired: false, humanReason: null,
+    }) as { ok: boolean; market_revision: number; instruction: { action: string } };
+    expect(declined).toMatchObject({ ok: true, instruction: { action: "HOLD" } });
+
+    const revisionBeforeHold = declined.market_revision;
     const hold = await runtime.invokeTool!("record_procurement_update", {
       availability: "UNKNOWN", price: null, currency: null, rateAllIn: null,
       pickupTime: null, expectedArrival: null, firm: false, expiresAt: null,
@@ -360,9 +371,9 @@ describe("dashboard procurement voice bridge", () => {
         confirmedRequirements: ["Tolls included"],
       });
 
-    const recorded = result as typeof result & { market_revision: number };
+    // The decline advanced the market, so the finish must cite that revision.
     expect(await runtime.invokeTool!("finish_procurement_call", {
-      marketRevision: recorded.market_revision,
+      marketRevision: declined.market_revision,
       disposition: "QUOTE_RECORDED",
     })).toMatchObject({ ok: true, disposition: "QUOTE_RECORDED", instruction: { action: "HOLD" } });
   });
@@ -513,11 +524,21 @@ describe("dashboard procurement voice bridge", () => {
     expect(await runtime.invokeTool!("record_procurement_update", completeOffer)).toMatchObject({
       instruction: { action: "CONFIRM" }, terminal: false,
     });
+    // Locking the quote earns exactly one "can you go lower?" before award.
     expect(await runtime.invokeTool!("record_procurement_update", {
       ...completeOffer,
       availability: "UNKNOWN", price: null, currency: null, rateAllIn: null,
       pickupTime: null, expectedArrival: null, firm: false,
       confirmedRequirements: [], rawStatement: "Yes.",
+    })).toMatchObject({
+      instruction: { action: "NEGOTIATE", reason: "ask_for_lower_price" }, terminal: false,
+    });
+    // A flat "no" carries no commercial facts but still spends the round.
+    expect(await runtime.invokeTool!("record_procurement_update", {
+      ...completeOffer,
+      availability: "UNKNOWN", price: null, currency: null, rateAllIn: null,
+      pickupTime: null, expectedArrival: null, firm: false,
+      confirmedRequirements: [], rawStatement: "No, 700 is already our best rate.",
     })).toMatchObject({
       instruction: { action: "AWARD" }, terminal: true, scripted_message_dispatched: true,
     });

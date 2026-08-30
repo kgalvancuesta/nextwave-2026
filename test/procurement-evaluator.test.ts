@@ -110,7 +110,7 @@ describe("deterministic procurement evaluator", () => {
     expect(speedFirst[0]?.id).toBe("fast");
   });
 
-  it("holds an early quote, then chooses the best feasible quote without counteroffers", () => {
+  it("holds an early quote, then asks each locked carrier once for a lower price before comparing", () => {
     const early = evaluateMarket({
       revision: 3,
       status: "NEGOTIATING",
@@ -123,7 +123,8 @@ describe("deterministic procurement evaluator", () => {
         { carrierId: "c", callId: "call-c", callActive: true, callTerminal: false, negotiationRounds: 0, humanReason: null, offer: null },
       ],
     });
-    expect(early.actions.a?.action).toBe("HOLD");
+    // The first locked quote is asked once for a lower price rather than parked.
+    expect(early.actions.a).toMatchObject({ action: "NEGOTIATE", reason: "ask_for_lower_price" });
     expect(early.actions.b?.action).toBe("CONTINUE_DISCOVERY");
 
     const developed = evaluateMarket({
@@ -138,9 +139,9 @@ describe("deterministic procurement evaluator", () => {
         { carrierId: "c", callId: "call-c", callActive: true, callTerminal: false, negotiationRounds: 0, humanReason: null, offer: offer("c1", "c", 850, "2030-01-10T17:00:00.000Z") },
       ],
     });
-    expect(developed.awardOfferId).toBe("b1");
-    expect(developed.actions.a).toMatchObject({ action: "RELEASE", reason: "market_awarded_to_better_offer" });
-    expect(developed.actions.b).toMatchObject({ action: "AWARD", reason: "best_current_feasible_offer" });
+    expect(developed.awardOfferId).toBeNull();
+    expect(developed.actions.a).toMatchObject({ action: "NEGOTIATE", reason: "ask_for_lower_price", field: "price", targetPrice: null });
+    expect(developed.actions.b).toMatchObject({ action: "NEGOTIATE", reason: "ask_for_lower_price" });
     expect(developed.actions.c).toMatchObject({ action: "RELEASE", reason: "pareto_dominated" });
   });
 

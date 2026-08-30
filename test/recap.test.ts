@@ -53,8 +53,13 @@ function completeOffer(price: number, arrival: string) {
 /** Drives the market to the automatic award recorded in the workflow tests. */
 function awardMarket(context: ReturnType<typeof setup>) {
   const { markets, calls } = context;
+  // Each locked quote is asked once for a lower price; the second update per
+  // carrier is that answer and spends the round, so the market can then award.
+  markets.recordProgressiveOfferForCall(calls[0]!.id, completeOffer(760, "2030-01-10T15:30:00.000Z"));
   markets.recordProgressiveOfferForCall(calls[0]!.id, completeOffer(760, "2030-01-10T15:30:00.000Z"));
   markets.recordProgressiveOfferForCall(calls[1]!.id, completeOffer(700, "2030-01-10T16:00:00.000Z"));
+  markets.recordProgressiveOfferForCall(calls[1]!.id, completeOffer(700, "2030-01-10T16:00:00.000Z"));
+  markets.recordProgressiveOfferForCall(calls[2]!.id, completeOffer(650, "2030-01-10T15:00:00.000Z"));
   return markets.recordProgressiveOfferForCall(calls[2]!.id, completeOffer(640, "2030-01-10T15:00:00.000Z"));
 }
 
