@@ -108,7 +108,11 @@ export interface ProcurementVoicePort {
   runFollowUps(followUps: ProcurementFollowUp[]): Promise<void>;
   getInstruction(callId: string): unknown;
   markHumanRequired(callId: string, reason: string): ProcurementToolOutcome | null;
-  validateFinish(callId: string, marketRevision: number): unknown;
+  validateFinish(
+    callId: string,
+    marketRevision: number,
+    disposition: "RELEASE" | "COMPLETE" | "HUMAN" | "QUOTE_RECORDED" | "VOICEMAIL",
+  ): unknown;
   /**
    * Delivers any written recap the award transaction queued. Called from the
    * live call path so the carrier receives the SMS while still on the phone,

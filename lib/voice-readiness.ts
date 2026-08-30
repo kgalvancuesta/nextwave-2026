@@ -118,12 +118,13 @@ async function assessVoiceReadiness(): Promise<VoiceReadinessResult> {
   checks.push(...endpointChecks);
   if (endpointChecks.some((check) => !check.ok)) return result(checks);
 
-  const [publicOrigin, twilioConfig, openAiModel] = await Promise.all([
+  const [publicOrigin, twilioConfig, openAiModel, transcriptionModel] = await Promise.all([
     checkPublicOrigin(telephony.publicBaseUrl),
     checkTwilioConfiguration(telephony),
-    checkOpenAiModel(volta.openAiApiKey, volta.realtimeModel),
+    checkOpenAiModel(volta.openAiApiKey, volta.realtimeModel, "openai_model"),
+    checkOpenAiModel(volta.openAiApiKey, volta.transcriptionModel, "openai_transcription_model"),
   ]);
-  checks.push(publicOrigin, twilioConfig, openAiModel);
+  checks.push(publicOrigin, twilioConfig, openAiModel, transcriptionModel);
   return result(checks);
 }
 
@@ -170,12 +171,12 @@ async function checkTwilioConfiguration(
   }
 }
 
-async function checkOpenAiModel(apiKey: string, model: string): Promise<VoiceReadinessCheck> {
+async function checkOpenAiModel(apiKey: string, model: string, id: string): Promise<VoiceReadinessCheck> {
   try {
     await new OpenAI({ apiKey }).models.retrieve(model);
-    return { id: "openai_model", ok: true, message: `OpenAI model ${model} is accessible.` };
+    return { id, ok: true, message: `OpenAI model ${model} is accessible.` };
   } catch (error) {
-    return { id: "openai_model", ok: false, message: `OpenAI model check failed: ${errorMessage(error)}` };
+    return { id, ok: false, message: `OpenAI model ${model} check failed: ${errorMessage(error)}` };
   }
 }
 

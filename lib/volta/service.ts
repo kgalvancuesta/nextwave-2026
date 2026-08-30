@@ -26,6 +26,7 @@ export function getVoiceControlService(): VoiceControlService {
       apiKey: volta.openAiApiKey,
       webhookSecret: volta.openAiWebhookSecret,
       model: volta.realtimeModel,
+      transcriptionModel: volta.transcriptionModel,
       voice: volta.voice,
     }),
     new TelephonyDialGateway(new TwilioTelephonyProvider(telephony)),

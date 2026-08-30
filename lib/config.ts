@@ -71,6 +71,7 @@ export interface VoltaConfig {
   openAiWebhookSecret: string;
   projectId: string | null;
   realtimeModel: string;
+  transcriptionModel: string;
   voice: string;
   /** The OpenAI Realtime SIP endpoint Twilio bridges answered calls into. */
   sipUri: string;
@@ -107,6 +108,7 @@ export function loadVoltaConfig(): VoltaConfig {
     openAiWebhookSecret: openAiWebhookSecret!,
     projectId: projectId || null,
     realtimeModel: process.env.OPENAI_REALTIME_MODEL?.trim() || "gpt-realtime-2.1",
+    transcriptionModel: process.env.OPENAI_TRANSCRIPTION_MODEL?.trim() || "gpt-transcribe",
     voice: process.env.OPENAI_VOICE?.trim() || "marin",
     sipUri: sipUri!,
     humanEscalationUri: process.env.HUMAN_ESCALATION_URI?.trim() || null,

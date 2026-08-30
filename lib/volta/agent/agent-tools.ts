@@ -98,7 +98,7 @@ const amendmentArgs = z.object({
 });
 const finishProcurementArgs = z.object({
   marketRevision: z.number().int().nonnegative(),
-  disposition: z.enum(["RELEASE", "COMPLETE", "HUMAN"]),
+  disposition: z.enum(["RELEASE", "COMPLETE", "HUMAN", "QUOTE_RECORDED", "VOICEMAIL"]),
 });
 
 const identifyOperation = tool<typeof identifyOperationArgs, ToolContext, string>({
@@ -143,7 +143,7 @@ const requestHumanEscalation = tool<typeof escalationArgs, ToolContext, string>(
 
 const recordProcurementUpdate = tool<typeof procurementUpdateArgs, ToolContext, string>({
   name: "record_procurement_update",
-  description: "Persist every useful availability, all-in price, arrival, requirement confirmation, or changed term immediately. Supply every key; use null or [] for facts the carrier has not stated. Relative times are accepted verbatim and normalized by the server.",
+  description: "Extract and persist every explicit fact from the carrier's latest turn in one call, including compound statements with availability, price, currency, pickup, arrival, all-in status, and requirements. rawStatement must preserve the carrier's exact words rather than a summary. Supply every key; use null or [] only for facts not stated. Relative times are accepted verbatim and normalized by the server.",
   parameters: procurementUpdateArgs,
   execute: (input, runContext) => invoke(runContext, "record_procurement_update", procurementPatch(input)),
   errorFunction: procurementToolFailure,
@@ -167,7 +167,7 @@ const proposeProcurementAmendment = tool<typeof amendmentArgs, ToolContext, stri
 
 const finishProcurementCall = tool<typeof finishProcurementArgs, ToolContext, string>({
   name: "finish_procurement_call",
-  description: "After saying goodbye, end a released or completed procurement call. The server rejects stale market revisions.",
+  description: "After saying goodbye, end a released, awarded, quote-recorded, human-handoff, or voicemail procurement call. The server validates that the disposition matches the current market instruction and rejects stale revisions.",
   parameters: finishProcurementArgs,
   execute: (input, runContext) => invoke(runContext, "finish_procurement_call", input),
   errorFunction: procurementToolFailure,

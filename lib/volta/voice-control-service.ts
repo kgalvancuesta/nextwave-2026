@@ -418,10 +418,12 @@ export class VoiceControlService {
     if (name === "finish_procurement_call") {
       if (!this.procurement) throw new Error("Procurement workflow is not configured");
       const marketRevision = z.number().int().nonnegative().parse(args.marketRevision);
-      const result = this.procurement.validateFinish(call.id, marketRevision);
+      const disposition = z.enum(["RELEASE", "COMPLETE", "HUMAN", "QUOTE_RECORDED", "VOICEMAIL"])
+        .parse(args.disposition);
+      const result = this.procurement.validateFinish(call.id, marketRevision, disposition);
       if (call.realtimeCallId) await this.realtime.hangup(call.realtimeCallId);
       this.store.updateCall(call.id, { status: "completed", endedAt: new Date().toISOString() });
-      this.store.appendEvent(call.id, "procurement.call_finished", { marketRevision, disposition: args.disposition });
+      this.store.appendEvent(call.id, "procurement.call_finished", { marketRevision, disposition });
       this.sessions.get(call.id)?.close();
       this.sessions.delete(call.id);
       return result;

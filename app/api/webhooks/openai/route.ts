@@ -19,6 +19,7 @@ export async function POST(request: Request) {
       apiKey: config.openAiApiKey,
       webhookSecret: config.openAiWebhookSecret,
       model: config.realtimeModel,
+      transcriptionModel: config.transcriptionModel,
       voice: config.voice,
     });
 

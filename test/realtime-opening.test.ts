@@ -7,8 +7,12 @@ describe("Realtime opening response", () => {
   afterEach(() => vi.useRealTimers());
 
   it("uses SIP-compatible noise reduction with low-eagerness interruption", () => {
-    expect(REALTIME_INPUT_AUDIO_CONFIG).toEqual({
+    expect(REALTIME_INPUT_AUDIO_CONFIG).toMatchObject({
       noiseReduction: { type: "far_field" },
+      transcription: {
+        model: "gpt-transcribe",
+        languages: ["en", "es"],
+      },
       turnDetection: {
         type: "semantic_vad",
         eagerness: "low",
@@ -29,6 +33,10 @@ describe("Realtime opening response", () => {
       type: "semantic_vad",
       eagerness: "low",
       interrupt_response: true,
+    });
+    expect(payload.audio?.input?.transcription).toMatchObject({
+      model: "gpt-transcribe",
+      languages: ["en", "es"],
     });
   });
 

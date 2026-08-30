@@ -9,6 +9,7 @@ export interface OpenAiAgentsRuntimeOptions {
   apiKey: string | undefined;
   webhookSecret: string | undefined;
   model: string;
+  transcriptionModel: string;
   voice: string;
 }
 
@@ -16,6 +17,15 @@ const WORKFLOW_NAME = "volta-voice-operations";
 
 export const REALTIME_INPUT_AUDIO_CONFIG = {
   noiseReduction: { type: "far_field" as const },
+  transcription: {
+    model: "gpt-transcribe" as const,
+    languages: ["en", "es"],
+    keywords: [
+      "MXN", "pesos", "pickup", "recoleccion", "arrival", "delivery",
+      "entrega", "all-in", "todo incluido",
+    ],
+    prompt: "Ground-transport carrier quote. Preserve every price, currency, date, clock time, AM/PM marker, and pickup-versus-delivery term exactly.",
+  },
   turnDetection: {
     type: "semantic_vad" as const,
     eagerness: "low" as const,
@@ -65,9 +75,14 @@ export class OpenAiAgentsRuntime implements RealtimeAgentGateway {
       model: this.options.model,
       context,
       config: {
+        reasoning: { effort: "low" },
         audio: {
           input: {
             ...REALTIME_INPUT_AUDIO_CONFIG,
+            transcription: {
+              ...REALTIME_INPUT_AUDIO_CONFIG.transcription,
+              model: this.options.transcriptionModel,
+            },
           },
         },
       },

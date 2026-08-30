@@ -62,7 +62,9 @@ describe("loadVoltaConfig", () => {
     process.env.OPENAI_SIP_URI = "sip:test@sip.api.openai.com";
     delete process.env.OPENAI_CREDENTIALS_FILE;
     delete process.env.OPENAI_REALTIME_MODEL;
+    delete process.env.OPENAI_TRANSCRIPTION_MODEL;
     expect(loadVoltaConfig().realtimeModel).toBe("gpt-realtime-2.1");
+    expect(loadVoltaConfig().transcriptionModel).toBe("gpt-transcribe");
   });
 
   it("loads an API key and derives the SIP URI from an ignored credential file", () => {

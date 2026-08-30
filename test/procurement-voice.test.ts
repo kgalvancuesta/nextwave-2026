@@ -34,7 +34,8 @@ describe("dashboard procurement voice bridge", () => {
     });
     expect(recap).toContain("order BAJA3, from Manzanillo to Monterrey");
     expect(recap).toContain("The required conditions are Tolls included");
-    expect(recap).toMatch(/Is that correct\?$/);
+    expect(recap).toMatch(/Can your company meet these requirements\?$/);
+    expect(recap).not.toMatch(/Is that correct\?$/);
 
     const closing = buildAwardClosingMessage({
       reference: "BAJA3",
@@ -70,6 +71,16 @@ describe("dashboard procurement voice bridge", () => {
       pickupTime: "in 12 hours",
       rawStatement: "August 30th at 5 PM.",
     }, now)).toMatchObject({ pickupTime: "2026-08-30T23:00:00.000Z" });
+    expect(normalizeProcurementUpdate({
+      price: 5_000,
+      currency: "MXN",
+      expectedArrival: null,
+      rawStatement: "I can do tomorrow at 5:00 PM for 5,000 pesos.",
+    }, now, { expectedTemporalField: "expectedArrival" })).toMatchObject({
+      price: 5_000,
+      currency: "MXN",
+      expectedArrival: "2026-08-30T23:00:00.000Z",
+    });
   });
 
   it("briefs a dashboard market call as procurement and streams tool facts into the shared market", async () => {
@@ -100,13 +111,17 @@ describe("dashboard procurement voice bridge", () => {
       data: { call_id: "rtc_procurement", sip_headers: [{ name: "X-Internal-Call-ID", value: call.id }] },
     });
     expect(runtime.profile?.kind).toBe("procurement");
-    expect(runtime.profile?.instructions).toContain("then wait for only yes or no");
-    expect(runtime.profile?.instructions).toContain("the carrier does not repeat them");
+    expect(runtime.profile?.instructions).toContain("carrier feasibility");
+    expect(runtime.profile?.instructions).toContain("The carrier never validates whether the buyer's schedule is correct");
+    expect(runtime.profile?.instructions).toContain("rawStatement must be the carrier's exact words");
+    expect(runtime.profile?.instructions).toContain("extract every explicit fact from that entire turn");
     expect(runtime.profile?.instructions).toContain("A clear yes is enough");
     expect(runtime.profile?.instructions).toContain("If this is clearly voicemail");
     expect(runtime.profile?.instructions).toContain("A tool payload failure is not a reason for human escalation");
     expect(runtime.profile?.instructions).toContain("Never ask again for a field whose recorded value is non-null");
     expect(runtime.profile?.instructions).toContain("Never ask the same time question more than twice total");
+    expect(runtime.profile?.instructions).toContain("Never go silent after a polite acknowledgment");
+    expect(runtime.profile?.instructions).toContain("disposition VOICEMAIL");
 
     const partial = await runtime.invokeTool!("record_procurement_update", {
       availability: "AVAILABLE",
@@ -148,13 +163,27 @@ describe("dashboard procurement voice bridge", () => {
     }) as {
       ok: boolean;
       instruction: { action: string };
-      recorded_values: { pickup_time: string | null; expected_arrival: string | null };
+      recorded_values: {
+        availability: string;
+        price: number | null;
+        currency: string | null;
+        rate_all_in: boolean | null;
+        pickup_time: string | null;
+        expected_arrival: string | null;
+      };
     };
 
     expect(result).toMatchObject({
       ok: true,
       comparable: true,
-      recorded_values: { pickup_time: null, expected_arrival: "2030-01-10T15:30:00.000Z" },
+      recorded_values: {
+        availability: "AVAILABLE",
+        price: 760,
+        currency: "USD",
+        rate_all_in: true,
+        pickup_time: null,
+        expected_arrival: "2030-01-10T15:30:00.000Z",
+      },
       instruction: { action: "HOLD" },
     });
     expect(markets.getMarketState(marketId)?.carriers.find((carrier) => carrier.carrier.id === carriers[0]!.id)?.latestOffer)
@@ -166,6 +195,47 @@ describe("dashboard procurement voice bridge", () => {
         expectedArrival: "2030-01-10T15:30:00.000Z",
         confirmedRequirements: ["Tolls included"],
       });
+
+    const recorded = result as typeof result & { market_revision: number };
+    expect(await runtime.invokeTool!("finish_procurement_call", {
+      marketRevision: recorded.market_revision,
+      disposition: "QUOTE_RECORDED",
+    })).toMatchObject({ ok: true, disposition: "QUOTE_RECORDED", instruction: { action: "HOLD" } });
+  });
+
+  it("ends voicemail cleanly instead of restarting the procurement opener", async () => {
+    const { db, repository, markets } = createTestContext();
+    const carrier = repository.createContact({
+      label: "Voicemail carrier", phoneInput: "+12025550113", e164PhoneNumber: "+12025550113",
+    });
+    const workspace = markets.createOrder({
+      name: "Voicemail load", client: "Nextwave", origin: "Manzanillo", destination: "Guadalajara",
+      currency: "MXN", targetPrice: 5_000, maximumPrice: 7_000,
+      preferredArrival: "2030-01-10T15:00:00.000Z", mustArriveBy: "2030-01-10T18:00:00.000Z",
+      priceWeight: 0.6, speedWeight: 0.4, minimumValidOffers: 1, desiredCarriers: 1,
+      conditions: [], carrierIds: [carrier.id],
+    });
+    const marketId = workspace.currentMarket!.market.id;
+    const started = markets.startMarket(marketId);
+    const call = repository.createOutboundBatch([carrier], "+12025550101", {
+      orderId: workspace.order.id, marketId,
+    }).calls[0]!;
+    const runtime = new FakeAgentRuntime();
+    const service = new VoiceControlService(
+      new VoltaStore(db), runtime, telephony, recap,
+      { fromNumber: "+12025550101", sipUri: "sip:test@sip.api.openai.com", humanEscalationUri: undefined },
+      new DashboardProcurementVoiceAdapter(markets),
+    );
+
+    await service.handleOpenAiWebhook({
+      type: "realtime.call.incoming",
+      data: { call_id: "rtc_voicemail", sip_headers: [{ name: "X-Internal-Call-ID", value: call.id }] },
+    });
+    expect(await runtime.invokeTool!("finish_procurement_call", {
+      marketRevision: started.market.revision,
+      disposition: "VOICEMAIL",
+    })).toMatchObject({ ok: true, disposition: "VOICEMAIL" });
+    expect(runtime.sessionsClosed).toBe(1);
   });
 
   it("replaces the AI with the scripted closing after the website awards the live offer", async () => {
