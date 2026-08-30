@@ -195,6 +195,19 @@ Twilio signatures are validated against `PUBLIC_BASE_URL` by default. A rejected
 - Confirm the account has funds and the selected Twilio number has Voice capability.
 - Regulations and geographic permissions can make a valid E.164 number uncallable. Marketline reports the Twilio error separately from phone-number validation.
 
+## Demo scenario
+
+`npm run demo:seed -- "Transportes Pacifico=+52..." "Drayage Occidente=+52..."`
+creates the carriers and one at-risk order -- free time ending in 28 hours,
+demurrage priced per day, a mandate with a hard ceiling, and two conditions the
+carrier must confirm out loud: a named driver and a confirmed terminal
+appointment. Those two are what make the evaluator enforce ground truth rather
+than accept a promise: a carrier that will not confirm them cannot be awarded.
+
+The order is left in DRAFT so the first thing that happens in front of an
+audience is the button press, not data entry. Without arguments the script uses
+placeholder numbers that will not ring.
+
 ## 5. Order and market test
 
 1. Add up to three carriers. Mexican national-format numbers use `MX` as the default region; international numbers should include `+` and country code.
