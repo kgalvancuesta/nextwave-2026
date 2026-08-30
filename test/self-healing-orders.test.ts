@@ -122,7 +122,7 @@ describe("self-healing orders", () => {
     expect(recovery.amendment.violations.map((violation) => violation.code)).toContain("UNAVAILABLE");
     const workspace = markets.getOrder(created.order.id)!;
     expect(workspace.commitments.find((commitment) => commitment.status === "ACTIVE")?.id).toBe(original.id);
-    expect(workspace.currentMarket?.carriers.map((carrier) => carrier.carrier.id)).not.toContain(carriers[0]!.id);
+    expect(workspace.currentMarket?.carriers.map((carrier) => carrier.carrier.id)).toEqual([carriers[1]!.id]);
   });
 
   it("requires human assistance when an unavailable commitment has no alternate carrier", () => {

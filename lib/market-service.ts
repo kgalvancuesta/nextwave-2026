@@ -842,7 +842,7 @@ export class OrderMarketService {
       && state.market.id !== context.market.id);
     const recoveryCarrierIds = recovery ? [] : this.selectRecoveryCandidates(
       context.order.id,
-      !carrierUnavailable,
+      false,
       context.activeCommitment.carrierId,
     );
     if (!recovery && recoveryCarrierIds.length === 0) {
@@ -1161,7 +1161,8 @@ export class OrderMarketService {
     if (openMarket) throw new Error("This order already has an open market.");
     const selectedIds = carrierIds?.length ? [...new Set(carrierIds)] : this.selectRecoveryCandidates(orderId);
     if (selectedIds.length < 1 || selectedIds.length > 3) throw new Error("Select between one and three carriers for recovery.");
-    if (this.calls.getContacts(selectedIds).length !== selectedIds.length) throw new Error("One or more recovery carriers no longer exist.");
+    const selectedContacts = this.calls.getContacts(selectedIds);
+    if (selectedContacts.length !== selectedIds.length) throw new Error("One or more recovery carriers no longer exist.");
     const next = Number((this.db.prepare("SELECT COALESCE(MAX(sequence_number), 0) + 1 AS next FROM markets WHERE order_id = ?").get(orderId) as Row).next);
     const now = new Date().toISOString();
     const marketId = randomUUID();
@@ -1179,7 +1180,8 @@ export class OrderMarketService {
         selectForOrder.run(orderId, carrierId, now);
       });
       this.db.prepare("UPDATE orders SET lifecycle_status = 'EXCEPTION', updated_at = ? WHERE id = ?").run(now, orderId);
-      this.insertEvent(orderId, marketId, null, "RECOVERY_MARKET_CREATED", `Recovery market #${next}`, now);
+      this.insertEvent(orderId, marketId, null, "RECOVERY_MARKET_CREATED",
+        `Matching with best alternative carriers with similar orders. Calling ${selectedContacts.map((contact) => contact.label).join(", ")}.`, now);
     })();
     return this.getOrder(orderId)!;
   }
@@ -1196,29 +1198,28 @@ export class OrderMarketService {
       ?? workspace.commitments.find((commitment) => commitment.id === atRiskCommitmentId)?.carrierId
       ?? workspace.commitments.find((commitment) => commitment.status === "INVALIDATED")?.carrierId
       ?? null;
-    const scores = new Map<string, number>();
+    const latestCarrierStates = new Map<string, MarketCarrierState>();
     for (const state of workspace.markets) {
       for (const carrier of state.carriers) {
-        let score = scores.get(carrier.carrier.id) ?? 0;
-        if (carrier.latestOffer) score += 200;
-        if (carrier.latestOffer?.isComparable && carrier.latestOffer.isValid) score += 800 - (carrier.rank ?? 20) * 10;
-        if (carrier.latestOffer?.availability === "UNAVAILABLE") score -= 250;
-        scores.set(carrier.carrier.id, score);
+        if (!latestCarrierStates.has(carrier.carrier.id)) latestCarrierStates.set(carrier.carrier.id, carrier);
       }
     }
-    for (const [index, carrierId] of this.selectCarrierCandidates(
-      workspace.order.origin,
-      workspace.order.destination,
-      3,
-    ).entries()) {
-      scores.set(carrierId, (scores.get(carrierId) ?? 0) + 100 - index);
-    }
-    const ranked = [...scores.entries()]
-      .filter(([carrierId]) => carrierId !== failedCarrierId)
-      .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
-      .map(([carrierId]) => carrierId);
-    if (ranked.length === 0 && failedCarrierId && includeFailedFallback) ranked.push(failedCarrierId);
-    return ranked.slice(0, Math.max(1, Math.min(3, workspace.order.desiredCarriers)));
+    const bestRetainedCarrierId = [...latestCarrierStates.values()]
+      .filter((carrier) => carrier.carrier.id !== failedCarrierId
+        && carrier.latestOffer?.availability === "AVAILABLE"
+        && carrier.latestOffer.isComparable
+        && carrier.latestOffer.isValid)
+      .sort((left, right) => (right.latestOffer?.score ?? 0) - (left.latestOffer?.score ?? 0)
+        || (left.latestOffer?.normalizedPrice ?? Infinity) - (right.latestOffer?.normalizedPrice ?? Infinity)
+        || left.carrier.label.localeCompare(right.carrier.label)
+        || left.carrier.id.localeCompare(right.carrier.id))[0]?.carrier.id;
+    if (bestRetainedCarrierId) return [bestRetainedCarrierId];
+
+    const dhl = this.calls.listContacts().find((contact) => contact.label.trim().toLowerCase() === "dhl");
+    const latestDhlOffer = dhl ? latestCarrierStates.get(dhl.id)?.latestOffer : null;
+    if (dhl && dhl.id !== failedCarrierId && latestDhlOffer?.availability !== "UNAVAILABLE") return [dhl.id];
+    if (failedCarrierId && includeFailedFallback) return [failedCarrierId];
+    return [];
   }
 
   completeOrder(orderId: string): OrderWorkspace {

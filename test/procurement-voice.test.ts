@@ -714,6 +714,50 @@ describe("dashboard procurement voice bridge", () => {
     expect(markets.getMarket((outcome.result as { recovery_market_id: string }).recovery_market_id)?.status).toBe("CALLING");
   });
 
+  it("matches DHL with a visible pause when no valid retained carrier remains", async () => {
+    const { repository, markets } = createTestContext();
+    const booked = repository.createContact({ label: "Booked", phoneInput: "+12025550117", e164PhoneNumber: "+12025550117" });
+    const dhl = repository.createContact({ label: "DHL", phoneInput: "+12025550118", e164PhoneNumber: "+12025550118" });
+    const outsideMandate = repository.createContact({ label: "Outside mandate", phoneInput: "+12025550119", e164PhoneNumber: "+12025550119" });
+    const created = markets.createOrder({
+      name: "DHL recovery load", client: "Nextwave", origin: "Dallas", destination: "Phoenix", reference: "REC-DHL",
+      currency: "USD", targetPrice: 1_400, maximumPrice: 1_500,
+      priceWeight: 1, speedWeight: 0, minimumValidOffers: 1, desiredCarriers: 2,
+      conditions: [], carrierIds: [booked.id, outsideMandate.id],
+    });
+    const offer = markets.recordOffer(created.currentMarket!.market.id, {
+      carrierId: booked.id, price: 1_450, isFinalOffer: true,
+    }).bestOffer!;
+    markets.recordOffer(created.currentMarket!.market.id, {
+      carrierId: outsideMandate.id, price: 1_650, isFinalOffer: true,
+    });
+    markets.commitOffer(offer.id);
+    const inbound = repository.upsertInboundCall({
+      twilioCallSid: "CA_dhl_recovery_voice", fromNumber: booked.e164PhoneNumber,
+      toNumber: "+12025550101", contactId: booked.id, status: "IN_PROGRESS", rawPayload: {},
+    });
+    markets.attachInboundCallToMarket(inbound.id, "REC-DHL");
+    const sequence: string[] = [];
+    const adapter = new DashboardProcurementVoiceAdapter(markets, () => new Date("2030-01-10T13:00:00.000Z"), {
+      async startMarket(_marketId, _orderId, carrierIds) { sequence.push(`call:${carrierIds.join(",")}`); },
+      async notifyCarrier() {},
+    }, async () => { sequence.push("matching"); });
+
+    const outcome = adapter.proposeAmendment(inbound.id, {
+      availability: "UNAVAILABLE", negotiationComplete: false,
+    });
+    const recoveryMarketId = (outcome.result as { recovery_market_id: string }).recovery_market_id;
+    const workspace = markets.getOrder(created.order.id)!;
+    expect(workspace.currentMarket?.carriers.map((carrier) => carrier.carrier.id)).toEqual([dhl.id]);
+    expect(workspace.events.find((event) => event.eventType === "RECOVERY_MARKET_CREATED")?.detail)
+      .toBe("Matching with best alternative carriers with similar orders. Calling DHL.");
+
+    await adapter.runFollowUps(outcome.followUps ?? []);
+
+    expect(sequence).toEqual(["matching", `call:${dhl.id}`]);
+    expect(markets.getMarket(recoveryMarketId)?.status).toBe("CALLING");
+  });
+
   it("opens an amendment callback as an inbound change request without replaying procurement", () => {
     const { repository, markets } = createTestContext();
     const carrier = repository.createContact({ label: "Booked carrier", phoneInput: "+12025550120", e164PhoneNumber: "+12025550120" });

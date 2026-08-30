@@ -34,6 +34,7 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
     private readonly markets: OrderMarketService = getOrderMarketService(),
     private readonly now: () => Date = () => new Date(),
     private readonly launcher: ProcurementCallLauncher = liveProcurementCallLauncher(),
+    private readonly waitForAlternativeMatch: () => Promise<void> = () => new Promise((resolve) => setTimeout(resolve, 3_000)),
   ) {}
 
   prepareCall(callId: string): void {
@@ -358,6 +359,10 @@ export class DashboardProcurementVoiceAdapter implements ProcurementVoicePort {
   async runFollowUps(followUps: ProcurementFollowUp[]): Promise<void> {
     for (const followUp of followUps) {
       if (followUp.type === "START_REVALIDATION_CALLS" || followUp.type === "START_RECOVERY_CALLS") {
+        const isDhlRecovery = followUp.type === "START_RECOVERY_CALLS"
+          && this.markets.getMarketState(followUp.marketId)?.carriers.some((carrier) =>
+            carrier.carrier.label.trim().toLowerCase() === "dhl");
+        if (isDhlRecovery) await this.waitForAlternativeMatch();
         const started = this.markets.startMarket(followUp.marketId);
         await this.launcher.startMarket(started.market.id, started.market.orderId, started.carrierIds);
       } else {
