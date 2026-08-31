@@ -6,6 +6,7 @@ dist/
 .env.local
 /apikey.md
 /openai-api.md
+/nextwave-runtime-handoff-*.zip
 secrets/
 *.credentials.md
 *.sqlite
